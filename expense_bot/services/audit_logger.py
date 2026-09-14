@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import logging
 import threading
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -9,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
+
+LOGGER = logging.getLogger(__name__)
 
 
 class AuditLogger:
@@ -30,9 +33,14 @@ class AuditLogger:
             **payload,
         }
         line = json.dumps(record, ensure_ascii=False, default=self._serialize)
-        with self._lock:
-            with self._log_path.open("a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
+        try:
+            with self._lock:
+                with self._log_path.open("a", encoding="utf-8") as handle:
+                    handle.write(line + "\n")
+        except OSError as exc:
+            # Auditing is auxiliary: a locked or read-only log must never break
+            # the expense-entry conversation.
+            LOGGER.warning("Audit event was not written to %s: %s", self._log_path, exc)
 
     def _serialize(self, value: Any) -> Any:
         if isinstance(value, BaseModel):

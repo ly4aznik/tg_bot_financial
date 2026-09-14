@@ -36,6 +36,11 @@ dist/
 # Application runtime files
 logs/
 *.log
+data/*.sqlite
+data/*.sqlite3
+data/*.db
+data/*.sqlite-shm
+data/*.sqlite-wal
 
 # Editors and operating systems
 .vscode/

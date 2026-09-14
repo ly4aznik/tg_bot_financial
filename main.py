@@ -3,13 +3,10 @@
 from telegram import Update
 
 from expense_bot.bot import ExpenseTelegramBot
-from expense_bot.categories import EXPENSE_TYPE_VALUES
 from expense_bot.config import Settings
 from expense_bot.services.audit_logger import AuditLogger
-from expense_bot.services.console_repository import ConsoleExpenseRepository
 from expense_bot.services.expense_service import ExpenseService
-from expense_bot.services.google_sheets import GoogleSheetsExpenseRepository
-from expense_bot.services.llm_parser import OpenAICompatibleExpenseParser
+from expense_bot.services.sqlite_repository import SQLiteExpenseRepository
 
 
 def configure_logging() -> None:
@@ -17,6 +14,9 @@ def configure_logging() -> None:
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
         level=logging.INFO,
     )
+    # python-telegram-bot uses httpx; INFO messages contain full request URLs,
+    # including the bot token.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def main() -> None:
@@ -29,35 +29,17 @@ def main() -> None:
         audit_logger.log_path,
     )
 
-    parser = OpenAICompatibleExpenseParser(
-        base_url=settings.openai_compatible_base_url,
-        model=settings.openai_compatible_model,
-        api_key=settings.openai_compatible_api_key,
-        timezone=settings.tzinfo,
-        timeout_seconds=settings.request_timeout_seconds,
-        reasoning_effort=settings.openai_compatible_reasoning_effort,
+    repository = SQLiteExpenseRepository(settings.sqlite_database_path)
+    logging.getLogger(__name__).info(
+        "SQLite database path: %s",
+        repository.database_path,
     )
-
-    if settings.test_mode:
-        repository = ConsoleExpenseRepository()
-    else:
-        repository = GoogleSheetsExpenseRepository(
-            service_account_json=settings.google_service_account_json,
-            spreadsheet_id=settings.google_spreadsheet_id,
-            worksheet_name=settings.google_worksheet_name,
-            timeout_seconds=settings.google_api_timeout_seconds,
-        )
-
-    service = ExpenseService(
-        parser=parser,
-        repository=repository,
-    )
+    service = ExpenseService(repository=repository)
     bot = ExpenseTelegramBot(
         token=settings.telegram_bot_token,
         service=service,
-        expense_types=EXPENSE_TYPE_VALUES,
         audit_logger=audit_logger,
-        test_mode=settings.test_mode,
+        timezone=settings.tzinfo,
     )
 
     application = bot.build_application()

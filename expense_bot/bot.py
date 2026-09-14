@@ -1,38 +1,32 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
-from pydantic import ValidationError
-from telegram import (
-    BotCommand,
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Message,
-    Update,
-)
-from telegram.constants import ChatAction
+from telegram import BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.error import BadRequest
-from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
-from expense_bot.errors import ExpenseBotError, LLMParseError
-from expense_bot.models import ExpenseRecognitionResult
+from expense_bot.categories import ExpenseType
+from expense_bot.models import ExpenseRecord
 from expense_bot.services.audit_logger import AuditLogger
 from expense_bot.services.expense_service import ExpenseService
 
 LOGGER = logging.getLogger(__name__)
-PENDING_EXPENSES_KEY = "pending_expenses"
-ACTIVE_PENDING_EXPENSE_ID_KEY = "active_pending_expense_id"
-CALLBACK_PREFIX = "expense"
+DRAFT_KEY = "expense_draft_v2"
+CALLBACK_PREFIX = "e2"
+
+
+def parse_manual_date(value: str, year: int) -> date:
+    """Parse DD.MM using the explicitly supplied current year."""
+    try:
+        return datetime.strptime(f"{value.strip()}.{year}", "%d.%m.%Y").date()
+    except ValueError as exc:
+        raise ValueError("Введи существующую дату в формате ДД.ММ, например 05.09.") from exc
 
 
 class ExpenseTelegramBot:
@@ -40,809 +34,304 @@ class ExpenseTelegramBot:
         self,
         token: str,
         service: ExpenseService,
-        expense_types: list[str],
         audit_logger: AuditLogger,
-        test_mode: bool = False,
+        timezone: ZoneInfo,
     ) -> None:
         self._token = token
         self._service = service
-        self._expense_types = expense_types
         self._audit_logger = audit_logger
-        self._test_mode = test_mode
-        self._storage_name = "console" if test_mode else "google_sheets"
+        self._timezone = timezone
 
     def build_application(self) -> Application:
-        application = (
-            Application.builder()
-            .token(self._token)
-            .post_init(self._post_init)
-            .build()
-        )
+        application = Application.builder().token(self._token).post_init(self._post_init).build()
         application.add_handler(CommandHandler("start", self.start))
         application.add_handler(CommandHandler("help", self.start))
-        application.add_handler(CommandHandler("categories", self.show_categories))
-        application.add_handler(CommandHandler("types", self.show_categories))
-        application.add_handler(
-            CallbackQueryHandler(self.handle_confirmation, pattern=r"^expense:")
-        )
-        application.add_handler(
-            MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_expense_message)
-        )
+        application.add_handler(CommandHandler("add", self.add))
+        application.add_handler(CommandHandler("cancel", self.cancel))
+        application.add_handler(CommandHandler(["categories", "types"], self.show_categories))
+        application.add_handler(CallbackQueryHandler(self.handle_callback, pattern=r"^e2:"))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
         application.add_error_handler(self.handle_error)
         return application
 
     async def _post_init(self, application: Application) -> None:
-        await application.bot.set_my_commands(self._build_bot_commands())
+        await application.bot.set_my_commands([
+            BotCommand("add", "Добавить расход"),
+            BotCommand("cancel", "Отменить текущий ввод"),
+            BotCommand("categories", "Показать категории"),
+            BotCommand("help", "Показать справку"),
+        ])
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message:
             return
-
-        examples = [
-            "650 обед",
-            "Вчера самокат 420 тип: Транспорт",
-            "05.04 линзы 523 тип: Здоровье/Медицина/Уход",
-        ]
-        mode_text = (
-            "Сейчас включен тестовый режим: после подтверждения я выведу запись в консоль, а не в Google Sheets.\n\n"
-            if self._test_mode
-            else "После распознавания я покажу запись и попрошу подтвердить ее перед сохранением в Google Sheets.\n\n"
-        )
-        text = (
-            "Я принимаю траты в свободной форме.\n\n"
-            + mode_text
-            + "Примеры сообщений:\n"
-            + "\n".join(f"- {example}" for example in examples)
-            + "\n\nДоступные типы трат:\n"
-            + self._format_expense_types()
-        )
-        await update.message.reply_text(text)
-
-    async def show_categories(
-        self,
-        update: Update,
-        context: ContextTypes.DEFAULT_TYPE,
-    ) -> None:
-        if not update.message:
-            return
         await update.message.reply_text(
-            "Доступные типы трат:\n" + self._format_expense_types()
+            "Бот учёта расходов 2.0. Данные заполняются пошагово и сохраняются в SQLite.",
+            reply_markup=self._start_markup(),
         )
 
-    async def handle_expense_message(
-        self,
-        update: Update,
-        context: ContextTypes.DEFAULT_TYPE,
-    ) -> None:
-        if not update.message or not update.effective_user or not update.effective_chat:
+    async def add(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not update.message or not update.effective_user:
             return
+        draft = self._new_draft()
+        context.user_data[DRAFT_KEY] = draft
+        self._audit("expense_started", update, flow_id=draft["flow_id"])
+        await update.message.reply_text("Выбери дату траты:", reply_markup=self._date_markup(draft["flow_id"]))
 
-        raw_text = update.message.text.strip()
-        if not raw_text:
-            await update.message.reply_text("Нужно текстовое сообщение с описанием траты.")
+    async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        draft = self._draft(context)
+        context.user_data.pop(DRAFT_KEY, None)
+        if update.message:
+            await update.message.reply_text(
+                "Ввод расхода отменён." if draft else "Сейчас нет незавершённого расхода.",
+                reply_markup=self._start_markup(),
+            )
+        if draft:
+            self._audit("expense_cancelled", update, flow_id=draft["flow_id"], source="command")
+
+    async def show_categories(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message:
+            await update.message.reply_text(
+                "Доступные категории:\n"
+                + "\n".join(f"• {expense_type.value}" for expense_type in ExpenseType)
+            )
+
+    async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not update.message or not update.effective_user:
             return
+        draft = self._draft(context)
+        if not draft:
+            await update.message.reply_text("Нажми «Добавить расход» или используй /add.", reply_markup=self._start_markup())
+            return
+        text = update.message.text.strip()
+        step = draft["step"]
+        if step == "custom_date":
+            await self._accept_custom_date(update.message, draft, text)
+        elif step == "amount":
+            await self._accept_amount(update.message, draft, text)
+        elif step == "description":
+            await self._accept_description(update.message, draft, text)
+        else:
+            await update.message.reply_text("Используй кнопки под текущим сообщением или /cancel.")
 
-        user_context = self._build_update_context(update)
-        self._audit_logger.log_event(
-            "user_message_received",
-            **user_context,
-            raw_text=raw_text,
-        )
-
-        active_pending_id = self._get_active_pending_id(context)
-        active_pending = self._load_pending_result(context, active_pending_id) if active_pending_id else None
-
-        if active_pending_id and active_pending:
-            if self._is_text_confirmation(raw_text):
-                await self._handle_text_confirmation(
-                    message=update.message,
-                    context=context,
-                    pending_id=active_pending_id,
-                    recognition_result=active_pending,
-                    user_context=user_context,
-                    raw_text=raw_text,
-                )
-                return
-
-            if self._is_text_cancellation(raw_text):
-                await self._handle_text_cancellation(
-                    message=update.message,
-                    context=context,
-                    pending_id=active_pending_id,
-                    recognition_result=active_pending,
-                    user_context=user_context,
-                    raw_text=raw_text,
-                )
-                return
-
-            if self._is_correction_instruction(raw_text):
-                await self._handle_text_correction(
-                    message=update.message,
-                    context=context,
-                    pending_id=active_pending_id,
-                    recognition_result=active_pending,
-                    user_context=user_context,
-                    instruction=raw_text,
-                )
-                return
-
-        await self._handle_new_expense_message(
-            message=update.message,
-            context=context,
-            user_context=user_context,
-            raw_text=raw_text,
-        )
-
-    async def handle_confirmation(
-        self,
-        update: Update,
-        context: ContextTypes.DEFAULT_TYPE,
-    ) -> None:
+    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         if not query or not query.data:
             return
-
         await query.answer()
-        parts = query.data.split(":", maxsplit=2)
-        if len(parts) != 3:
-            await query.edit_message_text("Не удалось обработать подтверждение.")
+        parts = query.data.split(":")
+        action = parts[1] if len(parts) > 1 else ""
+        if action == "new":
+            draft = self._new_draft()
+            context.user_data[DRAFT_KEY] = draft
+            self._audit("expense_started", update, flow_id=draft["flow_id"])
+            # Keep the previous saved-expense message in chat history. Starting
+            # another expense must create a fresh message instead of editing it.
+            if query.message:
+                await query.message.reply_text(
+                    "Выбери дату траты:",
+                    reply_markup=self._date_markup(draft["flow_id"]),
+                )
             return
 
-        _, action, pending_id = parts
-        user_context = self._build_query_context(query)
-        recognition_result = self._load_pending_result(context, pending_id)
-        if recognition_result is None:
-            text = "Эта запись уже обработана или больше не ждет подтверждения."
-            await query.edit_message_text(text)
-            self._log_bot_message(
-                stage="missing_pending",
-                text=text,
-                user_context=user_context,
-                pending_id=pending_id,
-            )
+        draft = self._draft(context)
+        flow_id = parts[2] if len(parts) > 2 else ""
+        if not draft or flow_id != draft["flow_id"]:
+            await self._edit(query, "Этот сценарий уже завершён или устарел. Начни новый расход.", self._start_markup())
             return
 
-        expense = recognition_result.expense
-        llm_call = recognition_result.llm_call
-        user_context = self._build_query_context(query, expense)
+        if action == "date" and len(parts) == 4:
+            await self._choose_date(query, draft, parts[3])
+        elif action == "cat" and len(parts) == 4:
+            await self._choose_category(query, draft, parts[3])
+        elif action == "edit" and len(parts) == 4:
+            await self._edit_field(query, draft, parts[3])
+        elif action == "save":
+            await self._save(query, context, draft, update)
+        elif action == "cancel":
+            context.user_data.pop(DRAFT_KEY, None)
+            self._audit("expense_cancelled", update, flow_id=flow_id, source="button")
+            await self._edit(query, "Ввод расхода отменён.", self._start_markup())
+        else:
+            await self._edit(query, "Неизвестное или устаревшее действие.", self._start_markup())
 
-        if action == "cancel":
-            self._remove_pending_result(context, pending_id)
-            text = "Запись отменена. Если нужно, отправь сообщение заново в исправленном виде."
-            self._audit_logger.log_event(
-                "user_decision",
-                **user_context,
-                decision="cancel",
-                decision_source="button",
-                pending_id=pending_id,
-                expense=expense,
-                llm_call=llm_call,
-            )
-            await query.edit_message_text(text)
-            self._log_bot_message(
-                stage="cancelled",
-                text=text,
-                user_context=user_context,
-                pending_id=pending_id,
-                expense=expense,
-                llm_call=llm_call,
-            )
+    async def _choose_date(self, query: CallbackQuery, draft: dict[str, Any], choice: str) -> None:
+        today = datetime.now(self._timezone).date()
+        if choice == "today":
+            draft["expense_date"] = today.isoformat()
+        elif choice == "yesterday":
+            draft["expense_date"] = (today - timedelta(days=1)).isoformat()
+        elif choice == "custom":
+            draft["step"] = "custom_date"
+            await self._edit(query, "Введи дату в формате ДД.ММ. Год будет текущим.")
             return
-
-        if action != "confirm":
-            text = "Неизвестное действие подтверждения."
-            await query.edit_message_text(text)
-            self._log_bot_message(
-                stage="unknown_confirmation_action",
-                text=text,
-                user_context=user_context,
-                pending_id=pending_id,
-            )
+        else:
             return
+        self._log_step(query, draft, "date_selected", expense_date=draft["expense_date"])
+        await self._after_field(query, draft, "amount", "Введи целую сумму траты, например 650 или 1250:")
 
-        self._audit_logger.log_event(
-            "user_decision",
-            **user_context,
-            decision="confirm",
-            decision_source="button",
-            pending_id=pending_id,
-            expense=expense,
-            llm_call=llm_call,
-        )
-        saving_text = "Сохраняю запись...\n\n" + self._format_expense(expense)
-        await query.edit_message_text(saving_text)
-        self._log_bot_message(
-            stage="saving",
-            text=saving_text,
-            user_context=user_context,
-            pending_id=pending_id,
-            expense=expense,
-            llm_call=llm_call,
-        )
-
-        success, final_text = await self._persist_pending_result(
-            context=context,
-            pending_id=pending_id,
-            recognition_result=recognition_result,
-            user_context=user_context,
-        )
-        await query.edit_message_text(final_text)
-        self._log_bot_message(
-            stage="persisted" if success else "persist_error",
-            text=final_text,
-            user_context=user_context,
-            pending_id=pending_id,
-            expense=expense,
-            llm_call=llm_call,
-        )
-
-    async def handle_error(
-        self,
-        update: object,
-        context: ContextTypes.DEFAULT_TYPE,
-    ) -> None:
-        LOGGER.error("Unhandled telegram error", exc_info=context.error)
-
-    async def _handle_new_expense_message(
-        self,
-        message: Message,
-        context: ContextTypes.DEFAULT_TYPE,
-        user_context: dict[str, object],
-        raw_text: str,
-    ) -> None:
-        processing_text = "Обрабатываю..."
-        processing_message = await message.reply_text(processing_text)
-        self._log_bot_message(
-            stage="processing",
-            text=processing_text,
-            user_context=user_context,
-            raw_text=raw_text,
-        )
-        await context.bot.send_chat_action(
-            chat_id=message.chat_id,
-            action=ChatAction.TYPING,
-        )
-
+    async def _accept_custom_date(self, message: Message, draft: dict[str, Any], text: str) -> None:
         try:
-            recognition_result = await self._service.parse_expense(
-                raw_text=raw_text,
-                telegram_user_id=message.from_user.id,
-                telegram_username=message.from_user.username,
-            )
-        except ExpenseBotError as exc:
-            LOGGER.warning("Failed to process expense message: %s", exc, exc_info=True)
-            llm_call = exc.llm_call if isinstance(exc, LLMParseError) else None
-            self._audit_logger.log_event(
-                "expense_recognition_failed",
-                **user_context,
-                raw_text=raw_text,
-                error=str(exc),
-                llm_call=llm_call,
-            )
-            error_text = (
-                "Не получилось обработать трату.\n"
-                f"Причина: {exc}\n\n"
-                "Попробуй написать, например: `650 обед` или `05.04 линзы 523 тип: Здоровье/Медицина/Уход`."
-            )
-            await self._safe_edit_message(processing_message, error_text)
-            self._log_bot_message(
-                stage="parse_error",
-                text=error_text,
-                user_context=user_context,
-                raw_text=raw_text,
-                llm_call=llm_call,
-            )
+            parsed = parse_manual_date(text, datetime.now(self._timezone).year)
+        except ValueError as exc:
+            await message.reply_text(str(exc))
             return
+        draft["expense_date"] = parsed.isoformat()
+        self._log_step(message, draft, "date_selected", expense_date=draft["expense_date"])
+        await self._after_text_field(message, draft, "amount", "Введи целую сумму траты, например 650 или 1250:")
+
+    async def _accept_amount(self, message: Message, draft: dict[str, Any], text: str) -> None:
+        try:
+            amount = ExpenseRecord.parse_expense_amount(text)
+            amount = ExpenseRecord.validate_expense_amount(amount)
+        except (TypeError, ValueError) as exc:
+            await message.reply_text(str(exc))
+            return
+        draft["expense_amount"] = str(amount)
+        self._log_step(message, draft, "amount_entered", expense_amount=str(amount))
+        if draft.pop("editing", False):
+            draft["step"] = "summary"
+            await message.reply_text(self._summary(draft), reply_markup=self._summary_markup(draft["flow_id"]))
+        else:
+            draft["step"] = "category"
+            await message.reply_text("Выбери категорию:", reply_markup=self._category_markup(draft["flow_id"]))
+
+    async def _choose_category(self, query: CallbackQuery, draft: dict[str, Any], code: str) -> None:
+        try:
+            category = ExpenseType[code]
+        except KeyError:
+            await self._edit(query, "Категория не найдена. Выбери категорию заново.", self._category_markup(draft["flow_id"]))
+            return
+        draft["expense_type"] = category.value
+        self._log_step(query, draft, "category_selected", expense_type=category.value)
+        await self._after_field(query, draft, "description", "Введи короткое описание траты:")
+
+    async def _accept_description(self, message: Message, draft: dict[str, Any], text: str) -> None:
+        try:
+            description = ExpenseRecord.validate_expense_description(text)
+        except ValueError as exc:
+            await message.reply_text(str(exc))
+            return
+        draft["expense_description"] = description
+        self._log_step(message, draft, "description_entered")
+        draft["step"] = "summary"
+        draft.pop("editing", None)
+        await message.reply_text(self._summary(draft), reply_markup=self._summary_markup(draft["flow_id"]))
+
+    async def _edit_field(self, query: CallbackQuery, draft: dict[str, Any], field: str) -> None:
+        draft["editing"] = True
+        if field == "date":
+            draft["step"] = "date"
+            await self._edit(query, "Выбери новую дату:", self._date_markup(draft["flow_id"]))
+        elif field == "amount":
+            draft["step"] = "amount"
+            await self._edit(query, "Введи новую сумму:")
+        elif field == "category":
+            draft["step"] = "category"
+            await self._edit(query, "Выбери новую категорию:", self._category_markup(draft["flow_id"]))
+        elif field == "description":
+            draft["step"] = "description"
+            await self._edit(query, "Введи новое описание:")
+
+    async def _after_field(self, query: CallbackQuery, draft: dict[str, Any], next_step: str, prompt: str) -> None:
+        if draft.pop("editing", False):
+            draft["step"] = "summary"
+            await self._edit(query, self._summary(draft), self._summary_markup(draft["flow_id"]))
+        else:
+            draft["step"] = next_step
+            markup = self._category_markup(draft["flow_id"]) if next_step == "category" else None
+            await self._edit(query, prompt, markup)
+
+    async def _after_text_field(self, message: Message, draft: dict[str, Any], next_step: str, prompt: str) -> None:
+        if draft.pop("editing", False):
+            draft["step"] = "summary"
+            await message.reply_text(self._summary(draft), reply_markup=self._summary_markup(draft["flow_id"]))
+        else:
+            draft["step"] = next_step
+            await message.reply_text(prompt)
+
+    async def _save(self, query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, draft: dict[str, Any], update: Update) -> None:
+        if draft.get("step") != "summary" or draft.get("saving"):
+            await self._edit(query, "Эта запись уже обрабатывается или данные ещё не заполнены.")
+            return
+        draft["saving"] = True
+        try:
+            record = ExpenseRecord.model_validate({
+                **draft,
+                "telegram_user_id": query.from_user.id,
+                "telegram_username": query.from_user.username,
+            })
+            await self._service.persist_expense(record)
         except Exception as exc:
-            LOGGER.exception("Unexpected error while handling message")
-            self._audit_logger.log_event(
-                "expense_recognition_failed",
-                **user_context,
-                raw_text=raw_text,
-                error=str(exc),
-            )
-            error_text = "Произошла внутренняя ошибка. Проверь логи приложения и попробуй еще раз."
-            await self._safe_edit_message(processing_message, error_text)
-            self._log_bot_message(
-                stage="parse_error",
-                text=error_text,
-                user_context=user_context,
-                raw_text=raw_text,
-            )
+            draft["saving"] = False
+            LOGGER.exception("Failed to persist development expense")
+            self._audit("expense_persist_failed", update, flow_id=draft["flow_id"], error=str(exc))
+            await self._edit(query, "Не удалось обработать запись. Попробуй сохранить ещё раз.", self._summary_markup(draft["flow_id"]))
             return
+        context.user_data.pop(DRAFT_KEY, None)
+        self._audit("expense_persisted", update, flow_id=draft["flow_id"], storage="sqlite", expense=record)
+        await self._edit(query, "Расход сохранён.\n\n" + self._format_expense(record), self._start_markup())
 
-        pending_id = uuid4().hex[:16]
-        self._save_pending_result(context, pending_id, recognition_result)
-        confirmation_text = self._format_pending_confirmation(recognition_result.expense)
-        self._audit_logger.log_event(
-            "expense_recognized",
-            **user_context,
-            pending_id=pending_id,
-            raw_text=raw_text,
-            expense=recognition_result.expense,
-            llm_call=recognition_result.llm_call,
-        )
-        await self._safe_edit_message(
-            processing_message,
-            confirmation_text,
-            reply_markup=self._build_confirmation_markup(pending_id),
-        )
-        self._log_bot_message(
-            stage="confirmation",
-            text=confirmation_text,
-            user_context=user_context,
-            pending_id=pending_id,
-            raw_text=raw_text,
-            expense=recognition_result.expense,
-            llm_call=recognition_result.llm_call,
-        )
-
-    async def _handle_text_confirmation(
-        self,
-        message: Message,
-        context: ContextTypes.DEFAULT_TYPE,
-        pending_id: str,
-        recognition_result: ExpenseRecognitionResult,
-        user_context: dict[str, object],
-        raw_text: str,
-    ) -> None:
-        expense = recognition_result.expense
-        llm_call = recognition_result.llm_call
-        self._audit_logger.log_event(
-            "user_decision",
-            **user_context,
-            decision="confirm",
-            decision_source="text",
-            pending_id=pending_id,
-            raw_text=raw_text,
-            expense=expense,
-            llm_call=llm_call,
-        )
-        saving_text = "Сохраняю запись...\n\n" + self._format_expense(expense)
-        saving_message = await message.reply_text(saving_text)
-        self._log_bot_message(
-            stage="saving",
-            text=saving_text,
-            user_context=user_context,
-            pending_id=pending_id,
-            expense=expense,
-            llm_call=llm_call,
-        )
-        success, final_text = await self._persist_pending_result(
-            context=context,
-            pending_id=pending_id,
-            recognition_result=recognition_result,
-            user_context=user_context,
-        )
-        await self._safe_edit_message(saving_message, final_text)
-        self._log_bot_message(
-            stage="persisted" if success else "persist_error",
-            text=final_text,
-            user_context=user_context,
-            pending_id=pending_id,
-            expense=expense,
-            llm_call=llm_call,
-        )
-
-    async def _handle_text_cancellation(
-        self,
-        message: Message,
-        context: ContextTypes.DEFAULT_TYPE,
-        pending_id: str,
-        recognition_result: ExpenseRecognitionResult,
-        user_context: dict[str, object],
-        raw_text: str,
-    ) -> None:
-        self._remove_pending_result(context, pending_id)
-        text = "Запись отменена. Если нужно, отправь сообщение заново в исправленном виде."
-        self._audit_logger.log_event(
-            "user_decision",
-            **user_context,
-            decision="cancel",
-            decision_source="text",
-            pending_id=pending_id,
-            raw_text=raw_text,
-            expense=recognition_result.expense,
-            llm_call=recognition_result.llm_call,
-        )
-        await message.reply_text(text)
-        self._log_bot_message(
-            stage="cancelled",
-            text=text,
-            user_context=user_context,
-            pending_id=pending_id,
-            expense=recognition_result.expense,
-            llm_call=recognition_result.llm_call,
-        )
-
-    async def _handle_text_correction(
-        self,
-        message: Message,
-        context: ContextTypes.DEFAULT_TYPE,
-        pending_id: str,
-        recognition_result: ExpenseRecognitionResult,
-        user_context: dict[str, object],
-        instruction: str,
-    ) -> None:
-        expense = recognition_result.expense
-        self._audit_logger.log_event(
-            "expense_correction_requested",
-            **user_context,
-            pending_id=pending_id,
-            instruction=instruction,
-            expense=expense,
-            llm_call=recognition_result.llm_call,
-        )
-
-        processing_text = "Исправляю распознанную трату..."
-        processing_message = await message.reply_text(processing_text)
-        self._log_bot_message(
-            stage="correction_processing",
-            text=processing_text,
-            user_context=user_context,
-            pending_id=pending_id,
-            instruction=instruction,
-            expense=expense,
-            llm_call=recognition_result.llm_call,
-        )
-        await context.bot.send_chat_action(
-            chat_id=message.chat_id,
-            action=ChatAction.TYPING,
-        )
-
-        try:
-            revised_result = await self._service.revise_expense(expense, instruction)
-        except ExpenseBotError as exc:
-            LOGGER.warning("Failed to revise pending expense: %s", exc, exc_info=True)
-            llm_call = exc.llm_call if isinstance(exc, LLMParseError) else None
-            self._audit_logger.log_event(
-                "expense_correction_failed",
-                **user_context,
-                pending_id=pending_id,
-                instruction=instruction,
-                expense=expense,
-                llm_call=llm_call,
-                error=str(exc),
-            )
-            error_text = (
-                "Не получилось исправить запись.\n"
-                f"Причина: {exc}\n\n"
-                "Попробуй написать точнее, например: `исправь сумму на 1000`, `поменяй категорию на Транспорт`, `поставь дату 2026-04-06`."
-            )
-            await self._safe_edit_message(processing_message, error_text)
-            self._log_bot_message(
-                stage="correction_error",
-                text=error_text,
-                user_context=user_context,
-                pending_id=pending_id,
-                instruction=instruction,
-                expense=expense,
-                llm_call=llm_call,
-            )
-            return
-        except Exception as exc:
-            LOGGER.exception("Unexpected error while revising pending expense")
-            self._audit_logger.log_event(
-                "expense_correction_failed",
-                **user_context,
-                pending_id=pending_id,
-                instruction=instruction,
-                expense=expense,
-                error=str(exc),
-            )
-            error_text = "Произошла внутренняя ошибка при исправлении записи."
-            await self._safe_edit_message(processing_message, error_text)
-            self._log_bot_message(
-                stage="correction_error",
-                text=error_text,
-                user_context=user_context,
-                pending_id=pending_id,
-                instruction=instruction,
-                expense=expense,
-            )
-            return
-
-        self._save_pending_result(context, pending_id, revised_result)
-        confirmation_text = self._format_corrected_confirmation(revised_result.expense)
-        self._audit_logger.log_event(
-            "expense_corrected",
-            **user_context,
-            pending_id=pending_id,
-            instruction=instruction,
-            previous_expense=expense,
-            expense=revised_result.expense,
-            llm_call=revised_result.llm_call,
-        )
-        await self._safe_edit_message(
-            processing_message,
-            confirmation_text,
-            reply_markup=self._build_confirmation_markup(pending_id),
-        )
-        self._log_bot_message(
-            stage="correction_confirmation",
-            text=confirmation_text,
-            user_context=user_context,
-            pending_id=pending_id,
-            instruction=instruction,
-            expense=revised_result.expense,
-            llm_call=revised_result.llm_call,
-        )
-
-    async def _persist_pending_result(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        pending_id: str,
-        recognition_result: ExpenseRecognitionResult,
-        user_context: dict[str, object],
-    ) -> tuple[bool, str]:
-        expense = recognition_result.expense
-        llm_call = recognition_result.llm_call
-        try:
-            await self._service.persist_expense(expense)
-        except ExpenseBotError as exc:
-            LOGGER.warning("Failed to persist expense: %s", exc, exc_info=True)
-            error_text = (
-                "Не получилось сохранить запись после подтверждения. Проверь настройки и попробуй еще раз.\n\n"
-                f"Причина: {exc}"
-            )
-            self._audit_logger.log_event(
-                "expense_persist_failed",
-                **user_context,
-                pending_id=pending_id,
-                expense=expense,
-                llm_call=llm_call,
-                storage=self._storage_name,
-                error=str(exc),
-            )
-            return False, error_text
-        except Exception as exc:
-            LOGGER.exception("Unexpected error while persisting expense")
-            error_text = "Произошла внутренняя ошибка при сохранении записи."
-            self._audit_logger.log_event(
-                "expense_persist_failed",
-                **user_context,
-                pending_id=pending_id,
-                expense=expense,
-                llm_call=llm_call,
-                storage=self._storage_name,
-                error=str(exc),
-            )
-            return False, error_text
-
-        self._remove_pending_result(context, pending_id)
-        saved_text = (
-            "Тестовый режим: запись подтверждена и выведена в консоль."
-            if self._test_mode
-            else "Запись подтверждена и сохранена в Google Sheets."
-        )
-        final_text = saved_text + "\n\n" + self._format_expense(expense)
-        self._audit_logger.log_event(
-            "expense_persisted",
-            **user_context,
-            pending_id=pending_id,
-            expense=expense,
-            llm_call=llm_call,
-            storage=self._storage_name,
-        )
-        return True, final_text
-
-    def _save_pending_result(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        pending_id: str,
-        recognition_result: ExpenseRecognitionResult,
-    ) -> None:
-        self._get_pending_store(context)[pending_id] = recognition_result.model_dump(mode="json")
-        self._set_active_pending_id(context, pending_id)
-
-    def _load_pending_result(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        pending_id: str | None,
-    ) -> ExpenseRecognitionResult | None:
-        if not pending_id:
-            return None
-
-        expense_data = self._get_pending_store(context).get(pending_id)
-        if expense_data is None:
-            self._clear_active_pending_id(context, pending_id)
-            return None
-
-        try:
-            return ExpenseRecognitionResult.model_validate(expense_data)
-        except ValidationError:
-            LOGGER.warning(
-                "Pending expense payload is invalid: %s",
-                expense_data,
-                exc_info=True,
-            )
-            self._get_pending_store(context).pop(pending_id, None)
-            self._clear_active_pending_id(context, pending_id)
-            return None
-
-    def _remove_pending_result(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        pending_id: str,
-    ) -> None:
-        self._get_pending_store(context).pop(pending_id, None)
-        self._clear_active_pending_id(context, pending_id)
-
-    def _build_confirmation_markup(self, pending_id: str) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        text="Да, записать",
-                        callback_data=f"{CALLBACK_PREFIX}:confirm:{pending_id}",
-                    ),
-                    InlineKeyboardButton(
-                        text="Нет, отменить",
-                        callback_data=f"{CALLBACK_PREFIX}:cancel:{pending_id}",
-                    ),
-                ]
-            ]
-        )
-
-    def _format_expense_types(self) -> str:
-        return "\n".join(f"- {expense_type}" for expense_type in self._expense_types)
+    def _new_draft(self) -> dict[str, Any]:
+        return {"flow_id": uuid4().hex[:12], "step": "date"}
 
     @staticmethod
-    def _build_bot_commands() -> list[BotCommand]:
-        return [
-            BotCommand("start", "Показать справку и примеры"),
-            BotCommand("categories", "Показать текущие категории трат"),
-            BotCommand("help", "Показать справку"),
-        ]
-
-    def _format_pending_confirmation(self, expense: Any) -> str:
-        return (
-            "Я распознал такую трату:\n\n"
-            + self._format_expense(expense)
-            + "\n\nПри необходимости можно изменить данные кнопкой или сообщением."
-        )
-
-    def _format_corrected_confirmation(self, expense: Any) -> str:
-        return (
-            "Обновил распознанную трату:\n\n"
-            + self._format_expense(expense)
-            + "\n\nВсе верно? Можно снова нажать кнопку или написать следующее исправление."
-        )
-
-    def _format_expense(self, expense: Any) -> str:
-        return (
-            f"Тип траты: {expense.expense_type.value}\n"
-            f"Дата траты: {expense.expense_date.isoformat()}\n"
-            f"Сумма траты: {expense.expense_amount:.2f}\n"
-            f"Описание траты: {expense.expense_description}"
-        )
-
-    def _get_pending_store(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-    ) -> dict[str, dict[str, object]]:
-        store = context.user_data.get(PENDING_EXPENSES_KEY)
-        if not isinstance(store, dict):
-            store = {}
-            context.user_data[PENDING_EXPENSES_KEY] = store
-        return store
-
-    def _get_active_pending_id(self, context: ContextTypes.DEFAULT_TYPE) -> str | None:
-        pending_id = context.user_data.get(ACTIVE_PENDING_EXPENSE_ID_KEY)
-        return pending_id if isinstance(pending_id, str) and pending_id else None
-
-    def _set_active_pending_id(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        pending_id: str,
-    ) -> None:
-        context.user_data[ACTIVE_PENDING_EXPENSE_ID_KEY] = pending_id
-
-    def _clear_active_pending_id(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        pending_id: str | None = None,
-    ) -> None:
-        active_pending_id = self._get_active_pending_id(context)
-        if pending_id is None or active_pending_id == pending_id:
-            context.user_data.pop(ACTIVE_PENDING_EXPENSE_ID_KEY, None)
-
-    def _build_update_context(self, update: Update) -> dict[str, object]:
-        user = update.effective_user
-        chat = update.effective_chat
-        message = update.message
-        return {
-            "telegram_user_id": user.id if user else None,
-            "telegram_username": user.username if user else None,
-            "telegram_full_name": user.full_name if user else None,
-            "chat_id": chat.id if chat else None,
-            "message_id": message.message_id if message else None,
-        }
-
-    def _build_query_context(self, query: CallbackQuery, expense: Any | None = None) -> dict[str, object]:
-        message = query.message
-        user = query.from_user
-        return {
-            "telegram_user_id": user.id if user else getattr(expense, "telegram_user_id", None),
-            "telegram_username": user.username if user else getattr(expense, "telegram_username", None),
-            "telegram_full_name": user.full_name if user else None,
-            "chat_id": message.chat_id if message else None,
-            "message_id": message.message_id if message else None,
-        }
-
-    def _log_bot_message(
-        self,
-        stage: str,
-        text: str,
-        user_context: dict[str, object],
-        **extra: Any,
-    ) -> None:
-        self._audit_logger.log_event(
-            "bot_message_sent",
-            stage=stage,
-            bot_message=text,
-            **user_context,
-            **extra,
-        )
-
-    def _is_text_confirmation(self, text: str) -> bool:
-        normalized = self._normalize_follow_up_text(text)
-        return normalized in {
-            "да",
-            "да все верно",
-            "все верно",
-            "верно",
-            "ок",
-            "окей",
-            "сохрани",
-            "сохранить",
-            "записать",
-            "записывай",
-        }
-
-    def _is_text_cancellation(self, text: str) -> bool:
-        normalized = self._normalize_follow_up_text(text)
-        return normalized in {
-            "нет",
-            "отмена",
-            "отмени",
-            "не надо",
-            "не записывай",
-            "не сохраняй",
-        }
-
-    def _is_correction_instruction(self, text: str) -> bool:
-        normalized = self._normalize_follow_up_text(text)
-        correction_cues = (
-            "исправ",
-            "поменя",
-            "измени",
-            "замени",
-            "поставь",
-            "укажи",
-            "сделай",
-            "сумм",
-            "стоим",
-            "категор",
-            "тип",
-            "дат",
-            "описан",
-            "назван",
-        )
-        return normalized.startswith("нет ") or any(cue in normalized for cue in correction_cues)
+    def _draft(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any] | None:
+        value = context.user_data.get(DRAFT_KEY)
+        return value if isinstance(value, dict) else None
 
     @staticmethod
-    def _normalize_follow_up_text(text: str) -> str:
-        return " ".join(text.strip().lower().replace("ё", "е").split())
+    def _start_markup() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("➕ Добавить расход", callback_data=f"{CALLBACK_PREFIX}:new")]])
 
-    async def _safe_edit_message(
-        self,
-        message: Message,
-        text: str,
-        reply_markup: InlineKeyboardMarkup | None = None,
-    ) -> None:
+    @staticmethod
+    def _date_markup(flow_id: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton("Сегодня", callback_data=f"e2:date:{flow_id}:today"),
+            InlineKeyboardButton("Вчера", callback_data=f"e2:date:{flow_id}:yesterday"),
+        ], [InlineKeyboardButton("Другая дата", callback_data=f"e2:date:{flow_id}:custom")]])
+
+    @staticmethod
+    def _category_markup(flow_id: str) -> InlineKeyboardMarkup:
+        buttons = [InlineKeyboardButton(item.value, callback_data=f"e2:cat:{flow_id}:{item.name}") for item in ExpenseType]
+        return InlineKeyboardMarkup([buttons[index:index + 2] for index in range(0, len(buttons), 2)])
+
+    @staticmethod
+    def _summary_markup(flow_id: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Сохранить", callback_data=f"e2:save:{flow_id}"), InlineKeyboardButton("❌ Отмена", callback_data=f"e2:cancel:{flow_id}")],
+            [InlineKeyboardButton("Изменить дату", callback_data=f"e2:edit:{flow_id}:date"), InlineKeyboardButton("Изменить сумму", callback_data=f"e2:edit:{flow_id}:amount")],
+            [InlineKeyboardButton("Изменить категорию", callback_data=f"e2:edit:{flow_id}:category")],
+            [InlineKeyboardButton("Изменить описание", callback_data=f"e2:edit:{flow_id}:description")],
+        ])
+
+    def _summary(self, draft: dict[str, Any]) -> str:
+        return "Проверь расход:\n\n" + self._format_expense(draft) + "\n\nСохранить или изменить данные?"
+
+    @staticmethod
+    def _format_expense(expense: Any) -> str:
+        def get(name: str) -> Any:
+            return expense.get(name) if isinstance(expense, dict) else getattr(expense, name)
+        return (
+            f"Дата: {get('expense_date')}\n"
+            f"Сумма: {Decimal(str(get('expense_amount'))):.0f}\n"
+            f"Категория: {get('expense_type').value if isinstance(get('expense_type'), ExpenseType) else get('expense_type')}\n"
+            f"Описание: {get('expense_description')}"
+        )
+
+    async def _edit(self, query: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
         try:
-            await message.edit_text(text, reply_markup=reply_markup)
+            await query.edit_message_text(text, reply_markup=markup)
         except BadRequest:
-            await message.reply_text(text, reply_markup=reply_markup)
+            if query.message:
+                await query.message.reply_text(text, reply_markup=markup)
 
+    def _audit(self, event: str, update: Update, **payload: Any) -> None:
+        self._audit_logger.log_event(event, telegram_user_id=update.effective_user.id if update.effective_user else None, chat_id=update.effective_chat.id if update.effective_chat else None, **payload)
+
+    def _log_step(self, source: Message | CallbackQuery, draft: dict[str, Any], event: str, **payload: Any) -> None:
+        user = source.from_user
+        self._audit_logger.log_event(event, telegram_user_id=user.id if user else None, flow_id=draft["flow_id"], **payload)
+
+    async def handle_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        LOGGER.error("Unhandled telegram error", exc_info=context.error)
