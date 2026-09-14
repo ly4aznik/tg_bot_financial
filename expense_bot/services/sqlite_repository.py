@@ -39,7 +39,10 @@ class SQLiteExpenseRepository:
                     expense_description TEXT NOT NULL,
                     telegram_user_id INTEGER NOT NULL,
                     telegram_username TEXT,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    source_file TEXT,
+                    source_row INTEGER,
+                    UNIQUE (source_file, source_row)
                 )
                 """
             )

@@ -41,6 +41,8 @@ data/*.sqlite3
 data/*.db
 data/*.sqlite-shm
 data/*.sqlite-wal
+data/*.bak
+sheets/
 
 # Editors and operating systems
 .vscode/

@@ -28,12 +28,22 @@ async def test_sqlite_repository_creates_database_and_saves_expense(tmp_path) ->
         row = connection.execute(
             """
             SELECT expense_date, expense_amount, expense_type,
-                   expense_description, telegram_user_id, telegram_username
+                   expense_description, telegram_user_id, telegram_username,
+                   source_file, source_row
             FROM expenses
             """
         ).fetchone()
 
-    assert row == ("2026-09-14", 650, "Транспорт", "Такси домой", 42, "tester")
+    assert row == (
+        "2026-09-14",
+        650,
+        "Транспорт",
+        "Такси домой",
+        42,
+        "tester",
+        None,
+        None,
+    )
 
 
 def test_sqlite_repository_initialization_is_idempotent(tmp_path) -> None:
