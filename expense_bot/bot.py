@@ -20,6 +20,13 @@ from expense_bot.services.expense_service import ExpenseService
 LOGGER = logging.getLogger(__name__)
 DRAFT_KEY = "expense_draft_v2"
 CALLBACK_PREFIX = "e2"
+SUMMARY_LABELS = {
+    ExpenseType.FOOD_DELIVERY: "Общепит/доставка",
+    ExpenseType.HEALTH: "Здоровье/уход",
+    ExpenseType.BASIC_GROCERIES: "Продукты",
+    ExpenseType.MANDATORY_PAYMENTS: "Платежи/подписки",
+    ExpenseType.PETS: "Дом. животные",
+}
 
 
 def parse_manual_date(value: str, year: int) -> date:
@@ -352,25 +359,10 @@ class ExpenseTelegramBot:
             "Ноябрь",
             "Декабрь",
         ]
-        rows = []
-        for expense_type in ExpenseType:
-            month_total, year_total = totals.get(expense_type.value, (0, 0))
-            if month_total or year_total:
-                label = expense_type.value[:24]
-                rows.append(f"{label:<24} {month_total:>9,} {year_total:>11,}")
-
         month_total = sum(value[0] for value in totals.values())
         year_total = sum(value[1] for value in totals.values())
-        divider = "-" * 46
-        table = [
-            f"{'Категория':<24} {'Месяц':>9} {'Год':>11}",
-            divider,
-            *rows,
-            divider,
-            f"{'ИТОГО':<24} {month_total:>9,} {year_total:>11,}",
-        ]
-        table_text = "\n".join(table).replace(",", " ")
-        title = f"Расходы: {month_labels[today.month]} {today.year} / {today.year} год"
+        month_table = ExpenseTelegramBot._format_period_table(totals, 0, month_total)
+        year_table = ExpenseTelegramBot._format_period_table(totals, 1, year_total)
         empty_categories = [
             expense_type.value
             for expense_type in ExpenseType
@@ -378,9 +370,34 @@ class ExpenseTelegramBot:
         ]
         empty_text = ", ".join(empty_categories) if empty_categories else "нет"
         return (
-            f"<b>{escape(title)}</b>\n<pre>{escape(table_text)}</pre>"
-            f"\n<b>Без расходов:</b> {escape(empty_text)}"
+            f"<b>{month_labels[today.month]} {today.year}</b>\n"
+            f"<pre>{escape(month_table)}</pre>\n"
+            f"<b>{today.year} год</b>\n"
+            f"<pre>{escape(year_table)}</pre>\n"
+            f"<b>Без расходов в {today.year} году:</b> {escape(empty_text)}"
         )
+
+    @staticmethod
+    def _format_period_table(
+        totals: dict[str, tuple[int, int]],
+        period_index: int,
+        grand_total: int,
+    ) -> str:
+        rows = []
+        for expense_type in ExpenseType:
+            amount = totals.get(expense_type.value, (0, 0))[period_index]
+            if amount:
+                label = SUMMARY_LABELS.get(expense_type, expense_type.value)
+                rows.append(f"{label:<18} {amount:>9,}")
+        divider = "-" * 28
+        table = [
+            f"{'Категория':<18} {'Сумма':>9}",
+            divider,
+            *rows,
+            divider,
+            f"{'ИТОГО':<18} {grand_total:>9,}",
+        ]
+        return "\n".join(table).replace(",", " ")
 
     @staticmethod
     def _format_expense(expense: Any) -> str:

@@ -58,8 +58,10 @@ def test_summary_table_contains_month_year_and_totals(tmp_path: Path) -> None:
     assert "1 250" in text
     assert "ИТОГО" in text
     assert "8 000" in text
-    assert "Без расходов:" in text
+    assert "Без расходов в 2026 году:" in text
     assert "Инвестиции" in text
+    assert "2026 год" in text
+    assert max(len(line) for line in text.splitlines() if "<" not in line) <= 28
 
 
 def test_summary_reports_when_every_category_has_expenses(tmp_path: Path) -> None:
@@ -68,7 +70,7 @@ def test_summary_reports_when_every_category_has_expenses(tmp_path: Path) -> Non
 
     text = bot._format_summary(totals, date(2026, 9, 14))
 
-    assert "<b>Без расходов:</b> нет" in text
+    assert "<b>Без расходов в 2026 году:</b> нет" in text
 
 
 def test_main_uses_sqlite_repository() -> None:
