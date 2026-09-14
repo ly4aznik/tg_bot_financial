@@ -45,4 +45,13 @@ python -m pytest
 python -m compileall -q main.py expense_bot tests
 ```
 
+## Docker
+
+```bash
+docker compose up -d --build
+docker compose logs -f bot
+```
+
+Файл `.env` не входит в образ. Каталоги `data/` и `logs/` подключаются как постоянные тома с хоста.
+
 Исходный код прежней версии доступен по Git-тегу `v1.0`.
