@@ -57,3 +57,34 @@ def test_sqlite_repository_initialization_is_idempotent(tmp_path) -> None:
         ).fetchone()[0]
 
     assert table_count == 1
+
+
+@pytest.mark.asyncio
+async def test_sqlite_repository_summarizes_month_and_year(tmp_path) -> None:
+    repository = SQLiteExpenseRepository(tmp_path / "expenses.sqlite3")
+    for expense_date, amount, category in (
+        (date(2026, 9, 1), 100, ExpenseType.TRANSPORT),
+        (date(2026, 9, 14), 250, ExpenseType.TRANSPORT),
+        (date(2026, 8, 1), 500, ExpenseType.TRANSPORT),
+        (date(2026, 9, 3), 80, ExpenseType.LUNCH),
+        (date(2025, 9, 3), 999, ExpenseType.LUNCH),
+    ):
+        await repository.append_expense(
+            ExpenseRecord(
+                expense_type=category,
+                expense_date=expense_date,
+                expense_amount=Decimal(amount),
+                expense_description="Тест",
+                telegram_user_id=42,
+            )
+        )
+
+    summary = await repository.summarize_expenses(
+        date(2026, 9, 1),
+        date(2026, 10, 1),
+        date(2026, 1, 1),
+        date(2027, 1, 1),
+    )
+
+    assert summary["Транспорт"] == (350, 850)
+    assert summary["Обед"] == (80, 80)

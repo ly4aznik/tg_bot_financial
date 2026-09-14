@@ -1,3 +1,4 @@
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -43,6 +44,31 @@ def test_summary_keyboard_can_edit_every_field(tmp_path: Path) -> None:
         assert f"e2:edit:a1b2c3d4e5f6:{field}" in callbacks
     assert "e2:save:a1b2c3d4e5f6" in callbacks
     assert "e2:cancel:a1b2c3d4e5f6" in callbacks
+
+
+def test_summary_table_contains_month_year_and_totals(tmp_path: Path) -> None:
+    bot = build_bot(tmp_path)
+    text = bot._format_summary(
+        {"Транспорт": (1_250, 5_000), "Обед": (700, 3_000)},
+        date(2026, 9, 14),
+    )
+
+    assert "Сентябрь 2026" in text
+    assert "Транспорт" in text
+    assert "1 250" in text
+    assert "ИТОГО" in text
+    assert "8 000" in text
+    assert "Без расходов:" in text
+    assert "Инвестиции" in text
+
+
+def test_summary_reports_when_every_category_has_expenses(tmp_path: Path) -> None:
+    bot = build_bot(tmp_path)
+    totals = {expense_type.value: (1, 1) for expense_type in ExpenseType}
+
+    text = bot._format_summary(totals, date(2026, 9, 14))
+
+    assert "<b>Без расходов:</b> нет" in text
 
 
 def test_main_uses_sqlite_repository() -> None:

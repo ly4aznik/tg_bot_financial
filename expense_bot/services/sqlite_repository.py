@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from datetime import date
 from pathlib import Path
 
 from expense_bot.models import ExpenseRecord
@@ -21,6 +22,21 @@ class SQLiteExpenseRepository:
 
     async def append_expense(self, expense: ExpenseRecord) -> None:
         await asyncio.to_thread(self._append_expense_sync, expense)
+
+    async def summarize_expenses(
+        self,
+        month_start: date,
+        next_month_start: date,
+        year_start: date,
+        next_year_start: date,
+    ) -> dict[str, tuple[int, int]]:
+        return await asyncio.to_thread(
+            self._summarize_expenses_sync,
+            month_start,
+            next_month_start,
+            year_start,
+            next_year_start,
+        )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._database_path, timeout=30)
@@ -71,3 +87,41 @@ class SQLiteExpenseRepository:
                     expense.created_at.isoformat(),
                 ),
             )
+
+    def _summarize_expenses_sync(
+        self,
+        month_start: date,
+        next_month_start: date,
+        year_start: date,
+        next_year_start: date,
+    ) -> dict[str, tuple[int, int]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    expense_type,
+                    SUM(CASE
+                        WHEN expense_date >= ? AND expense_date < ?
+                        THEN expense_amount ELSE 0
+                    END) AS month_total,
+                    SUM(CASE
+                        WHEN expense_date >= ? AND expense_date < ?
+                        THEN expense_amount ELSE 0
+                    END) AS year_total
+                FROM expenses
+                WHERE expense_date >= ? AND expense_date < ?
+                GROUP BY expense_type
+                """,
+                (
+                    month_start.isoformat(),
+                    next_month_start.isoformat(),
+                    year_start.isoformat(),
+                    next_year_start.isoformat(),
+                    year_start.isoformat(),
+                    next_year_start.isoformat(),
+                ),
+            ).fetchall()
+        return {
+            category: (int(month_total), int(year_total))
+            for category, month_total, year_total in rows
+        }

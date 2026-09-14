@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from html import escape
 from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -48,6 +49,7 @@ class ExpenseTelegramBot:
         application.add_handler(CommandHandler("help", self.start))
         application.add_handler(CommandHandler("add", self.add))
         application.add_handler(CommandHandler("cancel", self.cancel))
+        application.add_handler(CommandHandler("summary", self.summary))
         application.add_handler(CommandHandler(["categories", "types"], self.show_categories))
         application.add_handler(CallbackQueryHandler(self.handle_callback, pattern=r"^e2:"))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
@@ -58,6 +60,7 @@ class ExpenseTelegramBot:
         await application.bot.set_my_commands([
             BotCommand("add", "Добавить расход"),
             BotCommand("cancel", "Отменить текущий ввод"),
+            BotCommand("summary", "Сводка за месяц и год"),
             BotCommand("categories", "Показать категории"),
             BotCommand("help", "Показать справку"),
         ])
@@ -95,6 +98,30 @@ class ExpenseTelegramBot:
                 "Доступные категории:\n"
                 + "\n".join(f"• {expense_type.value}" for expense_type in ExpenseType)
             )
+
+    async def summary(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not update.message:
+            return
+        today = datetime.now(self._timezone).date()
+        month_start = today.replace(day=1)
+        next_month_start = (
+            date(today.year + 1, 1, 1)
+            if today.month == 12
+            else date(today.year, today.month + 1, 1)
+        )
+        year_start = date(today.year, 1, 1)
+        next_year_start = date(today.year + 1, 1, 1)
+        totals = await self._service.summarize_expenses(
+            month_start,
+            next_month_start,
+            year_start,
+            next_year_start,
+        )
+        await update.message.reply_text(
+            self._format_summary(totals, today),
+            parse_mode="HTML",
+        )
+        self._audit("summary_requested", update, month=today.month, year=today.year)
 
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.effective_user:
@@ -307,6 +334,53 @@ class ExpenseTelegramBot:
 
     def _summary(self, draft: dict[str, Any]) -> str:
         return "Проверь расход:\n\n" + self._format_expense(draft) + "\n\nСохранить или изменить данные?"
+
+    @staticmethod
+    def _format_summary(totals: dict[str, tuple[int, int]], today: date) -> str:
+        month_labels = [
+            "",
+            "Январь",
+            "Февраль",
+            "Март",
+            "Апрель",
+            "Май",
+            "Июнь",
+            "Июль",
+            "Август",
+            "Сентябрь",
+            "Октябрь",
+            "Ноябрь",
+            "Декабрь",
+        ]
+        rows = []
+        for expense_type in ExpenseType:
+            month_total, year_total = totals.get(expense_type.value, (0, 0))
+            if month_total or year_total:
+                label = expense_type.value[:24]
+                rows.append(f"{label:<24} {month_total:>9,} {year_total:>11,}")
+
+        month_total = sum(value[0] for value in totals.values())
+        year_total = sum(value[1] for value in totals.values())
+        divider = "-" * 46
+        table = [
+            f"{'Категория':<24} {'Месяц':>9} {'Год':>11}",
+            divider,
+            *rows,
+            divider,
+            f"{'ИТОГО':<24} {month_total:>9,} {year_total:>11,}",
+        ]
+        table_text = "\n".join(table).replace(",", " ")
+        title = f"Расходы: {month_labels[today.month]} {today.year} / {today.year} год"
+        empty_categories = [
+            expense_type.value
+            for expense_type in ExpenseType
+            if totals.get(expense_type.value, (0, 0)) == (0, 0)
+        ]
+        empty_text = ", ".join(empty_categories) if empty_categories else "нет"
+        return (
+            f"<b>{escape(title)}</b>\n<pre>{escape(table_text)}</pre>"
+            f"\n<b>Без расходов:</b> {escape(empty_text)}"
+        )
 
     @staticmethod
     def _format_expense(expense: Any) -> str:
