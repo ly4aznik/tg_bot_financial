@@ -38,7 +38,7 @@ async def test_sqlite_repository_creates_database_and_saves_expense(tmp_path) ->
         "2026-09-14",
         650,
         "Транспорт",
-        "Такси домой",
+        "такси домой",
         42,
         "tester",
         None,

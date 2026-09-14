@@ -47,3 +47,9 @@ def test_invalid_manual_date(raw: str) -> None:
 def test_description_is_required() -> None:
     with pytest.raises(ValidationError):
         make_record(expense_description=" ")
+
+
+def test_description_is_normalized_to_lowercase() -> None:
+    record = make_record(expense_description="  Такси ДОМОЙ  ")
+
+    assert record.expense_description == "такси домой"

@@ -67,7 +67,7 @@ class ExpenseRecord(BaseModel):
     @field_validator("expense_description")
     @classmethod
     def validate_expense_description(cls, value: str) -> str:
-        cleaned = value.strip()
+        cleaned = value.strip().lower()
         if len(cleaned) < 2:
             raise ValueError("Описание должно содержать минимум два символа.")
         return cleaned
