@@ -5,11 +5,21 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      HTTPS_PROXY: http://172.19.0.1:18080
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+    networks:
+      - default
+      - proxy
     logging:
       driver: json-file
       options:
         max-size: 10m
         max-file: "3"
+
+networks:
+  proxy:
+    external: true
+    name: nextcloud_proxy
