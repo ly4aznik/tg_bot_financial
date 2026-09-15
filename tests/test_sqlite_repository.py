@@ -88,3 +88,23 @@ async def test_sqlite_repository_summarizes_month_and_year(tmp_path) -> None:
 
     assert summary["Транспорт"] == (350, 850)
     assert summary["Обед"] == (80, 80)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_repository_lists_latest_expenses_first(tmp_path) -> None:
+    repository = SQLiteExpenseRepository(tmp_path / "expenses.sqlite3")
+    for day, amount in ((1, 100), (2, 200), (3, 300)):
+        await repository.append_expense(
+            ExpenseRecord(
+                expense_type=ExpenseType.TRANSPORT,
+                expense_date=date(2026, 9, day),
+                expense_amount=Decimal(amount),
+                expense_description=f"Трата {day}",
+                telegram_user_id=42,
+            )
+        )
+
+    recent = await repository.list_recent_expenses(2)
+
+    assert [expense.expense_amount for expense in recent] == [300, 200]
+    assert [expense.expense_description for expense in recent] == ["трата 3", "трата 2"]

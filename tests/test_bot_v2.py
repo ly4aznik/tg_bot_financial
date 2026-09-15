@@ -8,6 +8,7 @@ import pytest
 
 from expense_bot.bot import ExpenseTelegramBot
 from expense_bot.categories import ExpenseType
+from expense_bot.models import RecentExpense
 from expense_bot.services.audit_logger import AuditLogger
 from expense_bot.services.expense_service import ExpenseService
 
@@ -18,6 +19,9 @@ class RecordingRepository:
 
     async def append_expense(self, expense) -> None:
         self.records.append(expense)
+
+    async def list_recent_expenses(self, limit: int):
+        return list(reversed(self.records))[:limit]
 
 
 def build_bot(tmp_path: Path) -> ExpenseTelegramBot:
@@ -71,6 +75,28 @@ def test_summary_reports_when_every_category_has_expenses(tmp_path: Path) -> Non
     text = bot._format_summary(totals, date(2026, 9, 14))
 
     assert "<b>Без расходов в 2026 году:</b> нет" in text
+
+
+def test_recent_expenses_are_formatted_without_markdown(tmp_path: Path) -> None:
+    text = build_bot(tmp_path)._format_recent_expenses([
+        RecentExpense(date(2026, 9, 15), 12_500, "Транспорт", "такси домой"),
+        RecentExpense(date(2026, 9, 14), 300, "Обед", ""),
+    ])
+
+    assert "1. 15.09.2026 — 12 500" in text
+    assert "Транспорт · такси домой" in text
+    assert "Обед · без описания" in text
+    assert "<" not in text
+
+
+def test_start_keyboard_contains_recent_expenses_button(tmp_path: Path) -> None:
+    callbacks = {
+        button.callback_data
+        for row in build_bot(tmp_path)._start_markup().inline_keyboard
+        for button in row
+    }
+
+    assert "e2:recent" in callbacks
 
 
 def test_main_uses_sqlite_repository() -> None:

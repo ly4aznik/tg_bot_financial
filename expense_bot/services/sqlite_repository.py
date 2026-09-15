@@ -5,7 +5,7 @@ import sqlite3
 from datetime import date
 from pathlib import Path
 
-from expense_bot.models import ExpenseRecord
+from expense_bot.models import ExpenseRecord, RecentExpense
 
 
 class SQLiteExpenseRepository:
@@ -37,6 +37,9 @@ class SQLiteExpenseRepository:
             year_start,
             next_year_start,
         )
+
+    async def list_recent_expenses(self, limit: int) -> list[RecentExpense]:
+        return await asyncio.to_thread(self._list_recent_expenses_sync, limit)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._database_path, timeout=30)
@@ -125,3 +128,26 @@ class SQLiteExpenseRepository:
             category: (int(month_total), int(year_total))
             for category, month_total, year_total in rows
         }
+
+    def _list_recent_expenses_sync(self, limit: int) -> list[RecentExpense]:
+        if limit <= 0:
+            return []
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT expense_date, expense_amount, expense_type, expense_description
+                FROM expenses
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            RecentExpense(
+                expense_date=date.fromisoformat(expense_date),
+                expense_amount=int(expense_amount),
+                expense_type=expense_type,
+                expense_description=expense_description,
+            )
+            for expense_date, expense_amount, expense_type, expense_description in rows
+        ]

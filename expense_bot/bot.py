@@ -13,7 +13,7 @@ from telegram.error import BadRequest
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from expense_bot.categories import ExpenseType
-from expense_bot.models import ExpenseRecord
+from expense_bot.models import ExpenseRecord, RecentExpense
 from expense_bot.services.audit_logger import AuditLogger
 from expense_bot.services.expense_service import ExpenseService
 
@@ -57,6 +57,7 @@ class ExpenseTelegramBot:
         application.add_handler(CommandHandler("add", self.add))
         application.add_handler(CommandHandler("cancel", self.cancel))
         application.add_handler(CommandHandler("summary", self.summary))
+        application.add_handler(CommandHandler("recent", self.recent))
         application.add_handler(CommandHandler(["categories", "types"], self.show_categories))
         application.add_handler(CallbackQueryHandler(self.handle_callback, pattern=r"^e2:"))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
@@ -68,6 +69,7 @@ class ExpenseTelegramBot:
             BotCommand("add", "Добавить расход"),
             BotCommand("cancel", "Отменить текущий ввод"),
             BotCommand("summary", "Сводка за месяц и год"),
+            BotCommand("recent", "Последние 10 расходов"),
             BotCommand("categories", "Показать категории"),
             BotCommand("help", "Показать справку"),
         ])
@@ -130,6 +132,13 @@ class ExpenseTelegramBot:
         )
         self._audit("summary_requested", update, month=today.month, year=today.year)
 
+    async def recent(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not update.message:
+            return
+        expenses = await self._service.list_recent_expenses()
+        await update.message.reply_text(self._format_recent_expenses(expenses))
+        self._audit("recent_expenses_requested", update, count=len(expenses))
+
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.effective_user:
             return
@@ -166,6 +175,12 @@ class ExpenseTelegramBot:
                     "Выбери дату траты:",
                     reply_markup=self._date_markup(draft["flow_id"]),
                 )
+            return
+        if action == "recent":
+            expenses = await self._service.list_recent_expenses()
+            if query.message:
+                await query.message.reply_text(self._format_recent_expenses(expenses))
+            self._audit("recent_expenses_requested", update, count=len(expenses))
             return
 
         draft = self._draft(context)
@@ -316,7 +331,10 @@ class ExpenseTelegramBot:
 
     @staticmethod
     def _start_markup() -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([[InlineKeyboardButton("➕ Добавить расход", callback_data=f"{CALLBACK_PREFIX}:new")]])
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Добавить расход", callback_data=f"{CALLBACK_PREFIX}:new")],
+            [InlineKeyboardButton("🕘 Последние 10", callback_data=f"{CALLBACK_PREFIX}:recent")],
+        ])
 
     @staticmethod
     def _date_markup(flow_id: str) -> InlineKeyboardMarkup:
@@ -409,6 +427,18 @@ class ExpenseTelegramBot:
             f"Категория: {get('expense_type').value if isinstance(get('expense_type'), ExpenseType) else get('expense_type')}\n"
             f"Описание: {get('expense_description')}"
         )
+
+    @staticmethod
+    def _format_recent_expenses(expenses: list[RecentExpense]) -> str:
+        if not expenses:
+            return "Сохранённых расходов пока нет."
+        blocks = ["Последние 10 расходов:"]
+        for index, expense in enumerate(expenses, start=1):
+            blocks.append(
+                f"{index}. {expense.expense_date:%d.%m.%Y} — {expense.expense_amount:,}".replace(",", " ")
+                + f"\n{expense.expense_type} · {expense.expense_description or 'без описания'}"
+            )
+        return "\n\n".join(blocks)
 
     async def _edit(self, query: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
         try:

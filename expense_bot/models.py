@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from pydantic import BaseModel, Field, field_validator
 
 from expense_bot.categories import ExpenseType
+
+
+@dataclass(frozen=True)
+class RecentExpense:
+    expense_date: date
+    expense_amount: int
+    expense_type: str
+    expense_description: str
 
 
 class ExpenseRecord(BaseModel):

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Protocol
 
-from expense_bot.models import ExpenseRecord
+from expense_bot.models import ExpenseRecord, RecentExpense
 
 
 class ExpenseRepository(Protocol):
@@ -16,6 +16,8 @@ class ExpenseRepository(Protocol):
         year_start: date,
         next_year_start: date,
     ) -> dict[str, tuple[int, int]]: ...
+
+    async def list_recent_expenses(self, limit: int) -> list[RecentExpense]: ...
 
 
 class ExpenseService:
@@ -38,3 +40,6 @@ class ExpenseService:
             year_start,
             next_year_start,
         )
+
+    async def list_recent_expenses(self, limit: int = 10) -> list[RecentExpense]:
+        return await self._repository.list_recent_expenses(limit)
