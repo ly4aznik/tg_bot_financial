@@ -474,8 +474,8 @@ class ExpenseTelegramBot:
             f"Среднее на этот день: {average_today:,.0f}\n"
             f"Отклонение: {sign}{difference:,.0f}"
         ).replace(",", " ")
-        await message.reply_photo(
-            photo=InputFile(image, filename=f"expense-trend-{today:%Y-%m}.png"),
+        await message.reply_document(
+            document=InputFile(image, filename=f"expense-trend-{today:%Y-%m}.png"),
             caption=caption,
         )
         self._audit("expense_trend_requested", update, month=today.month, year=today.year)

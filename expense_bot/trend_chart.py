@@ -3,6 +3,7 @@ from __future__ import annotations
 from io import BytesIO
 
 import matplotlib
+from PIL import Image
 
 matplotlib.use("Agg")
 
@@ -12,7 +13,7 @@ from matplotlib.ticker import FuncFormatter
 from expense_bot.models import ExpenseTrend
 
 
-def render_expense_trend(trend: ExpenseTrend) -> BytesIO:
+def render_expense_trend(trend: ExpenseTrend) -> bytes:
     figure, axis = plt.subplots(figsize=(10, 6), dpi=150)
     axis.plot(
         trend.days,
@@ -42,8 +43,15 @@ def render_expense_trend(trend: ExpenseTrend) -> BytesIO:
     axis.legend(loc="upper left", frameon=False)
     figure.tight_layout()
 
-    image = BytesIO()
-    figure.savefig(image, format="png", bbox_inches="tight")
+    rendered = BytesIO()
+    figure.savefig(rendered, format="png", bbox_inches="tight", facecolor="white")
     plt.close(figure)
-    image.seek(0)
-    return image
+    rendered.seek(0)
+
+    # Flatten the Matplotlib RGBA output to a regular RGB PNG. Telegram's
+    # photo pipeline can mishandle transparency, while an RGB PNG sent as a
+    # document is preserved byte-for-byte.
+    result = BytesIO()
+    with Image.open(rendered) as image:
+        image.convert("RGB").save(result, format="PNG")
+    return result.getvalue()

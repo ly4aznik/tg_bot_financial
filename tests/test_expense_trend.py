@@ -53,4 +53,4 @@ def test_render_expense_trend_returns_png() -> None:
 
     image = render_expense_trend(trend)
 
-    assert image.read(8) == b"\x89PNG\r\n\x1a\n"
+    assert image[:8] == b"\x89PNG\r\n\x1a\n"
