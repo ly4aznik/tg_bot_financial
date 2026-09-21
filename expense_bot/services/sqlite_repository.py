@@ -41,6 +41,9 @@ class SQLiteExpenseRepository:
     async def list_recent_expenses(self, limit: int) -> list[RecentExpense]:
         return await asyncio.to_thread(self._list_recent_expenses_sync, limit)
 
+    async def daily_expense_totals(self, start: date, end: date) -> dict[date, int]:
+        return await asyncio.to_thread(self._daily_expense_totals_sync, start, end)
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._database_path, timeout=30)
         connection.execute("PRAGMA foreign_keys = ON")
@@ -155,3 +158,20 @@ class SQLiteExpenseRepository:
             )
             for expense_date, expense_amount, expense_type, expense_description in rows
         ]
+
+    def _daily_expense_totals_sync(self, start: date, end: date) -> dict[date, int]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT expense_date, SUM(expense_amount)
+                FROM expenses
+                WHERE expense_date >= ? AND expense_date < ?
+                GROUP BY expense_date
+                ORDER BY expense_date
+                """,
+                (start.isoformat(), end.isoformat()),
+            ).fetchall()
+        return {
+            date.fromisoformat(expense_date): int(total)
+            for expense_date, total in rows
+        }

@@ -18,6 +18,16 @@ class RecentExpense:
     expense_description: str
 
 
+@dataclass(frozen=True)
+class ExpenseTrend:
+    days: list[int]
+    current_cumulative: list[int | None]
+    average_cumulative: list[float]
+    today_day: int
+    current_month_label: str
+    history_label: str
+
+
 class ExpenseRecord(BaseModel):
     expense_type: ExpenseType
     expense_date: date

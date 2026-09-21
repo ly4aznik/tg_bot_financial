@@ -108,3 +108,27 @@ async def test_sqlite_repository_lists_latest_expenses_oldest_to_newest(tmp_path
 
     assert [expense.expense_amount for expense in recent] == [200, 300]
     assert [expense.expense_description for expense in recent] == ["трата 2", "трата 3"]
+
+
+@pytest.mark.asyncio
+async def test_sqlite_repository_groups_daily_expense_totals(tmp_path) -> None:
+    repository = SQLiteExpenseRepository(tmp_path / "expenses.sqlite3")
+    for expense_date, amount in (
+        (date(2026, 9, 1), 100),
+        (date(2026, 9, 1), 250),
+        (date(2026, 9, 2), 500),
+        (date(2026, 10, 1), 999),
+    ):
+        await repository.append_expense(
+            ExpenseRecord(
+                expense_type=ExpenseType.OTHER,
+                expense_date=expense_date,
+                expense_amount=Decimal(amount),
+                expense_description="тест",
+                telegram_user_id=42,
+            )
+        )
+
+    totals = await repository.daily_expense_totals(date(2026, 9, 1), date(2026, 10, 1))
+
+    assert totals == {date(2026, 9, 1): 350, date(2026, 9, 2): 500}

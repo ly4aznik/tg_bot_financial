@@ -111,6 +111,7 @@ def test_start_keyboard_contains_recent_expenses_button(tmp_path: Path) -> None:
     }
 
     assert "e2:recent" in callbacks
+    assert "e2:trend" in callbacks
 
 
 def test_main_uses_sqlite_repository() -> None:

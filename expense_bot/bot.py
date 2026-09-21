@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -8,7 +9,7 @@ from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from telegram import BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram import BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Message, Update
 from telegram.error import BadRequest
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -16,6 +17,7 @@ from expense_bot.categories import ExpenseType
 from expense_bot.models import ExpenseRecord, RecentExpense
 from expense_bot.services.audit_logger import AuditLogger
 from expense_bot.services.expense_service import ExpenseService
+from expense_bot.trend_chart import render_expense_trend
 
 LOGGER = logging.getLogger(__name__)
 DRAFT_KEY = "expense_draft_v2"
@@ -58,6 +60,7 @@ class ExpenseTelegramBot:
         application.add_handler(CommandHandler("cancel", self.cancel))
         application.add_handler(CommandHandler("summary", self.summary))
         application.add_handler(CommandHandler("recent", self.recent))
+        application.add_handler(CommandHandler("trend", self.trend))
         application.add_handler(CommandHandler(["categories", "types"], self.show_categories))
         application.add_handler(CallbackQueryHandler(self.handle_callback, pattern=r"^e2:"))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
@@ -70,6 +73,7 @@ class ExpenseTelegramBot:
             BotCommand("cancel", "Отменить текущий ввод"),
             BotCommand("summary", "Сводка за месяц и год"),
             BotCommand("recent", "Последние 10 расходов"),
+            BotCommand("trend", "График расходов и тренда"),
             BotCommand("categories", "Показать категории"),
             BotCommand("help", "Показать справку"),
         ])
@@ -139,6 +143,11 @@ class ExpenseTelegramBot:
         await update.message.reply_text(self._format_recent_expenses(expenses))
         self._audit("recent_expenses_requested", update, count=len(expenses))
 
+    async def trend(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not update.message:
+            return
+        await self._send_trend_chart(update.message, update)
+
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.effective_user:
             return
@@ -181,6 +190,10 @@ class ExpenseTelegramBot:
             if query.message:
                 await query.message.reply_text(self._format_recent_expenses(expenses))
             self._audit("recent_expenses_requested", update, count=len(expenses))
+            return
+        if action == "trend":
+            if query.message:
+                await self._send_trend_chart(query.message, update)
             return
 
         draft = self._draft(context)
@@ -339,6 +352,7 @@ class ExpenseTelegramBot:
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("➕ Добавить расход", callback_data=f"{CALLBACK_PREFIX}:new")],
             [InlineKeyboardButton("🕘 Последние 10", callback_data=f"{CALLBACK_PREFIX}:recent")],
+            [InlineKeyboardButton("📈 Расходы и тренд", callback_data=f"{CALLBACK_PREFIX}:trend")],
         ])
 
     @staticmethod
@@ -444,6 +458,27 @@ class ExpenseTelegramBot:
                 + f"\n{expense.expense_type} · {expense.expense_description or 'без описания'}"
             )
         return "\n\n".join(blocks)
+
+    async def _send_trend_chart(self, message: Message, update: Update) -> None:
+        today = datetime.now(self._timezone).date()
+        trend = await self._service.build_expense_trend(today)
+        image = await asyncio.to_thread(render_expense_trend, trend)
+        current_total = next(
+            value for value in reversed(trend.current_cumulative) if value is not None
+        )
+        average_today = trend.average_cumulative[today.day - 1]
+        difference = current_total - average_today
+        sign = "+" if difference > 0 else ""
+        caption = (
+            f"На {today:%d.%m.%Y}: {current_total:,.0f}\n"
+            f"Среднее на этот день: {average_today:,.0f}\n"
+            f"Отклонение: {sign}{difference:,.0f}"
+        ).replace(",", " ")
+        await message.reply_photo(
+            photo=InputFile(image, filename=f"expense-trend-{today:%Y-%m}.png"),
+            caption=caption,
+        )
+        self._audit("expense_trend_requested", update, month=today.month, year=today.year)
 
     async def _edit(self, query: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
         try:
