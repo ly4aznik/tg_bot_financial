@@ -83,10 +83,24 @@ def test_recent_expenses_are_formatted_without_markdown(tmp_path: Path) -> None:
         RecentExpense(date(2026, 9, 14), 300, "Обед", ""),
     ])
 
-    assert "1. 15.09.2026 — 12 500" in text
+    assert "2. 15.09.2026 — 12 500" in text
+    assert "1. 14.09.2026 — 300" in text
     assert "Транспорт · такси домой" in text
     assert "Обед · без описания" in text
     assert "<" not in text
+
+
+def test_ten_recent_expenses_are_numbered_from_ten_to_one(tmp_path: Path) -> None:
+    expenses = [
+        RecentExpense(date(2026, 9, day), day * 100, "Обед", f"трата {day}")
+        for day in range(1, 11)
+    ]
+
+    text = build_bot(tmp_path)._format_recent_expenses(expenses)
+    numbered_lines = [line for line in text.splitlines() if line[:1].isdigit()]
+
+    assert numbered_lines[0].startswith("10. ")
+    assert numbered_lines[-1].startswith("1. ")
 
 
 def test_start_keyboard_contains_recent_expenses_button(tmp_path: Path) -> None:

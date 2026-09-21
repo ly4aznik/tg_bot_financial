@@ -438,7 +438,7 @@ class ExpenseTelegramBot:
         if not expenses:
             return "Сохранённых расходов пока нет."
         blocks = ["Последние 10 расходов:"]
-        for index, expense in enumerate(expenses, start=1):
+        for index, expense in zip(range(len(expenses), 0, -1), expenses):
             blocks.append(
                 f"{index}. {expense.expense_date:%d.%m.%Y} — {expense.expense_amount:,}".replace(",", " ")
                 + f"\n{expense.expense_type} · {expense.expense_description or 'без описания'}"
