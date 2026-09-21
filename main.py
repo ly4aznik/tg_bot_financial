@@ -40,6 +40,7 @@ def main() -> None:
         service=service,
         audit_logger=audit_logger,
         timezone=settings.tzinfo,
+        allowed_user_ids=settings.allowed_user_ids,
     )
 
     application = bot.build_application()

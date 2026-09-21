@@ -9,6 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     telegram_bot_token: str = Field(..., alias="TELEGRAM_BOT_TOKEN")
+    allowed_telegram_user_ids: str = Field(..., alias="ALLOWED_TELEGRAM_USER_IDS")
     bot_timezone: str = Field(default="Europe/Moscow", alias="BOT_TIMEZONE")
     audit_log_path: Path = Field(default=Path("logs/interactions.jsonl"), alias="AUDIT_LOG_PATH")
     sqlite_database_path: Path = Field(
@@ -29,6 +30,20 @@ class Settings(BaseSettings):
         ZoneInfo(value)
         return value
 
+    @field_validator("allowed_telegram_user_ids")
+    @classmethod
+    def validate_allowed_user_ids(cls, value: str) -> str:
+        parts = [part.strip() for part in value.split(",") if part.strip()]
+        if not parts:
+            raise ValueError("ALLOWED_TELEGRAM_USER_IDS must contain at least one Telegram user ID.")
+        if any(not part.isdigit() or int(part) <= 0 for part in parts):
+            raise ValueError("ALLOWED_TELEGRAM_USER_IDS must be a comma-separated list of positive integers.")
+        return ",".join(parts)
+
     @property
     def tzinfo(self) -> ZoneInfo:
         return ZoneInfo(self.bot_timezone)
+
+    @property
+    def allowed_user_ids(self) -> frozenset[int]:
+        return frozenset(int(part) for part in self.allowed_telegram_user_ids.split(","))

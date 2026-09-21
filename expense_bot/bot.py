@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from telegram import BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Message, Update
 from telegram.error import BadRequest
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, ApplicationHandlerStop, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, TypeHandler, filters
 
 from expense_bot.categories import ExpenseType
 from expense_bot.models import ExpenseRecord, RecentExpense
@@ -46,14 +46,17 @@ class ExpenseTelegramBot:
         service: ExpenseService,
         audit_logger: AuditLogger,
         timezone: ZoneInfo,
+        allowed_user_ids: frozenset[int],
     ) -> None:
         self._token = token
         self._service = service
         self._audit_logger = audit_logger
         self._timezone = timezone
+        self._allowed_user_ids = allowed_user_ids
 
     def build_application(self) -> Application:
         application = Application.builder().token(self._token).post_init(self._post_init).build()
+        application.add_handler(TypeHandler(Update, self._authorize_update), group=-1)
         application.add_handler(CommandHandler("start", self.start))
         application.add_handler(CommandHandler("help", self.start))
         application.add_handler(CommandHandler("add", self.add))
@@ -66,6 +69,19 @@ class ExpenseTelegramBot:
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
         application.add_error_handler(self.handle_error)
         return application
+
+    async def _authorize_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        user = update.effective_user
+        if user and user.id in self._allowed_user_ids:
+            return
+
+        self._audit("access_denied", update)
+        if update.callback_query:
+            await update.callback_query.answer("Доступ запрещён.", show_alert=True)
+        elif update.message:
+            await update.message.reply_text("Доступ к боту запрещён.")
+        raise ApplicationHandlerStop
 
     async def _post_init(self, application: Application) -> None:
         await application.bot.set_my_commands([

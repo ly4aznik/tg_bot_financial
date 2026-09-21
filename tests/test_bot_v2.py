@@ -30,6 +30,7 @@ def build_bot(tmp_path: Path) -> ExpenseTelegramBot:
         service=ExpenseService(RecordingRepository()),
         audit_logger=AuditLogger(tmp_path / "audit.jsonl"),
         timezone=ZoneInfo("Europe/Moscow"),
+        allowed_user_ids=frozenset({42}),
     )
 
 
@@ -187,6 +188,7 @@ async def test_save_is_idempotent_after_draft_is_removed(tmp_path: Path) -> None
         service=ExpenseService(repository),
         audit_logger=AuditLogger(tmp_path / "audit.jsonl"),
         timezone=ZoneInfo("Europe/Moscow"),
+        allowed_user_ids=frozenset({42}),
     )
     draft = {
         "flow_id": "flow123",

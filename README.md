@@ -38,10 +38,13 @@ copy .env.example .env
 
 ```env
 TELEGRAM_BOT_TOKEN=<YOUR_TELEGRAM_BOT_TOKEN>
+ALLOWED_TELEGRAM_USER_IDS=344810170
 BOT_TIMEZONE=Europe/Moscow
 AUDIT_LOG_PATH=logs/interactions.jsonl
 SQLITE_DATABASE_PATH=data/expenses.sqlite3
 ```
+
+`ALLOWED_TELEGRAM_USER_IDS` — обязательный белый список Telegram ID через запятую. Пользователи вне списка не могут выполнять команды, нажимать кнопки, добавлять или просматривать расходы.
 
 ## Запуск и тесты
 
