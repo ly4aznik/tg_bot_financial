@@ -242,8 +242,8 @@ class ExpenseTelegramBot:
             draft["step"] = "summary"
             await message.reply_text(self._summary(draft), reply_markup=self._summary_markup(draft["flow_id"]))
         else:
-            draft["step"] = "category"
-            await message.reply_text("Выбери категорию:", reply_markup=self._category_markup(draft["flow_id"]))
+            draft["step"] = "description"
+            await message.reply_text("Введи короткое описание траты:")
 
     async def _choose_category(self, query: CallbackQuery, draft: dict[str, Any], code: str) -> None:
         try:
@@ -253,7 +253,9 @@ class ExpenseTelegramBot:
             return
         draft["expense_type"] = category.value
         self._log_step(query, draft, "category_selected", expense_type=category.value)
-        await self._after_field(query, draft, "description", "Введи короткое описание траты:")
+        draft.pop("editing", None)
+        draft["step"] = "summary"
+        await self._edit(query, self._summary(draft), self._summary_markup(draft["flow_id"]))
 
     async def _accept_description(self, message: Message, draft: dict[str, Any], text: str) -> None:
         try:
@@ -263,9 +265,12 @@ class ExpenseTelegramBot:
             return
         draft["expense_description"] = description
         self._log_step(message, draft, "description_entered")
-        draft["step"] = "summary"
-        draft.pop("editing", None)
-        await message.reply_text(self._summary(draft), reply_markup=self._summary_markup(draft["flow_id"]))
+        if draft.pop("editing", False):
+            draft["step"] = "summary"
+            await message.reply_text(self._summary(draft), reply_markup=self._summary_markup(draft["flow_id"]))
+        else:
+            draft["step"] = "category"
+            await message.reply_text("Выбери категорию:", reply_markup=self._category_markup(draft["flow_id"]))
 
     async def _edit_field(self, query: CallbackQuery, draft: dict[str, Any], field: str) -> None:
         draft["editing"] = True

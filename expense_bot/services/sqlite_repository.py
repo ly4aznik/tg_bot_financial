@@ -136,9 +136,13 @@ class SQLiteExpenseRepository:
             rows = connection.execute(
                 """
                 SELECT expense_date, expense_amount, expense_type, expense_description
-                FROM expenses
-                ORDER BY id DESC
-                LIMIT ?
+                FROM (
+                    SELECT id, expense_date, expense_amount, expense_type, expense_description
+                    FROM expenses
+                    ORDER BY id DESC
+                    LIMIT ?
+                ) AS recent_expenses
+                ORDER BY id ASC
                 """,
                 (limit,),
             ).fetchall()

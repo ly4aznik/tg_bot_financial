@@ -142,11 +142,11 @@ async def test_complete_manual_workflow(tmp_path: Path) -> None:
     assert draft["expense_date"].endswith("-12-31")
 
     await bot._accept_amount(message, draft, "1250")
+    assert draft["step"] == "description"
+    await bot._accept_description(message, draft, "Такси домой")
     assert draft["step"] == "category"
     query = fake_query()
     await bot._choose_category(query, draft, "TRANSPORT")
-    assert draft["step"] == "description"
-    await bot._accept_description(message, draft, "Такси домой")
     assert draft["step"] == "summary"
     assert draft["expense_type"] == "Транспорт"
 

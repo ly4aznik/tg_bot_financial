@@ -91,7 +91,7 @@ async def test_sqlite_repository_summarizes_month_and_year(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_sqlite_repository_lists_latest_expenses_first(tmp_path) -> None:
+async def test_sqlite_repository_lists_latest_expenses_oldest_to_newest(tmp_path) -> None:
     repository = SQLiteExpenseRepository(tmp_path / "expenses.sqlite3")
     for day, amount in ((1, 100), (2, 200), (3, 300)):
         await repository.append_expense(
@@ -106,5 +106,5 @@ async def test_sqlite_repository_lists_latest_expenses_first(tmp_path) -> None:
 
     recent = await repository.list_recent_expenses(2)
 
-    assert [expense.expense_amount for expense in recent] == [300, 200]
-    assert [expense.expense_description for expense in recent] == ["трата 3", "трата 2"]
+    assert [expense.expense_amount for expense in recent] == [200, 300]
+    assert [expense.expense_description for expense in recent] == ["трата 2", "трата 3"]
