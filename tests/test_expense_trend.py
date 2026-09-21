@@ -1,6 +1,8 @@
 from datetime import date
+from io import BytesIO
 
 import pytest
+from PIL import Image
 
 from expense_bot.models import ExpenseTrend
 from expense_bot.services.expense_service import ExpenseService, shift_month
@@ -54,3 +56,5 @@ def test_render_expense_trend_returns_png() -> None:
     image = render_expense_trend(trend)
 
     assert image[:8] == b"\x89PNG\r\n\x1a\n"
+    with Image.open(BytesIO(image)) as rendered:
+        assert rendered.mode == "RGB"
