@@ -113,6 +113,31 @@ def test_start_keyboard_contains_recent_expenses_button(tmp_path: Path) -> None:
 
     assert "e2:recent" in callbacks
     assert "e2:trend" in callbacks
+    assert "e2:lastweek" in callbacks
+    assert "e2:thisweek" in callbacks
+
+
+def test_week_labels_include_iso_number_and_full_dates(tmp_path: Path) -> None:
+    bot = build_bot(tmp_path)
+    assert bot._week_label(date(2025, 12, 29), True) == (
+        "Текущая неделя №1 (2026): 29.12.2025–04.01.2026"
+    )
+    assert bot._week_label(date(2026, 9, 21), False) == (
+        "Прошлая неделя №39 (2026): 21.09.2026–27.09.2026"
+    )
+
+
+def test_week_caption_contains_full_summary_and_fits_telegram_limit(tmp_path: Path) -> None:
+    bot = build_bot(tmp_path)
+    totals = {category.value: (100, 0) for category in ExpenseType}
+    table = bot._format_period_table(totals, 0, len(ExpenseType) * 100)
+    caption = bot._format_week_caption(
+        bot._week_label(date(2026, 9, 21), True), table, True, 1500, 500
+    )
+    assert "Текущая неделя №39 (2026): 21.09.2026–27.09.2026" in caption
+    assert "<pre>" in caption and "ИТОГО" in caption
+    assert "Среднее к сегодня" in caption and "Отклонение: +500" in caption
+    assert len(caption) <= 1024
 
 
 def test_main_uses_sqlite_repository() -> None:

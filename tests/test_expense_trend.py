@@ -6,7 +6,7 @@ from PIL import Image
 
 from expense_bot.models import ExpenseTrend
 from expense_bot.services.expense_service import ExpenseService, shift_month
-from expense_bot.trend_chart import render_expense_trend
+from expense_bot.trend_chart import render_expense_trend, render_weekly_year_trend
 
 
 class DailyTotalsRepository:
@@ -58,3 +58,40 @@ def test_render_expense_trend_returns_png() -> None:
     assert image[:8] == b"\x89PNG\r\n\x1a\n"
     with Image.open(BytesIO(image)) as rendered:
         assert rendered.mode == "RGB"
+
+
+@pytest.mark.asyncio
+async def test_weekly_year_trend_uses_52_complete_monday_sunday_weeks() -> None:
+    repository = DailyTotalsRepository({
+        date(2025, 9, 22): 10,
+        date(2026, 9, 20): 20,
+        date(2026, 9, 21): 30,
+        date(2026, 9, 23): 5,
+        date(2026, 9, 27): 40,
+        date(2026, 9, 28): 999,
+    })
+    trend = await ExpenseService(repository).build_weekly_year_trend(date(2026, 9, 28))
+    assert repository.requested_range == (date(2025, 9, 22), date(2026, 9, 28))
+    assert trend.week_start == date(2026, 9, 21)
+    assert trend.current_cumulative == [30, 30, 35, 35, 35, 35, 75]
+    assert trend.average_cumulative[0] == 10 / 52
+    assert trend.average_cumulative[-1] == 30 / 52
+    image = render_weekly_year_trend(trend)
+    assert image[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+@pytest.mark.asyncio
+async def test_current_week_trend_stops_at_today_and_excludes_future_expenses() -> None:
+    repository = DailyTotalsRepository({
+        date(2025, 9, 22): 52,
+        date(2026, 9, 21): 20,
+        date(2026, 9, 23): 30,
+        date(2026, 9, 24): 999,
+    })
+    trend = await ExpenseService(repository).build_weekly_trend(date(2026, 9, 23), current=True)
+    assert repository.requested_range == (date(2025, 9, 22), date(2026, 9, 24))
+    assert trend.week_start == date(2026, 9, 21)
+    assert trend.current_cumulative == [20, 20, 50, None, None, None, None]
+    assert trend.average_cumulative[0] == 1
+    assert trend.average_cumulative[2] == 1
+    assert trend.is_current_week

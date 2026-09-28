@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import calendar
-from datetime import date
+from datetime import date, timedelta
 from typing import Protocol
 
-from expense_bot.models import ExpenseRecord, ExpenseTrend, RecentExpense
+from expense_bot.models import ExpenseRecord, ExpenseTrend, RecentExpense, WeeklyExpenseTrend
 
 
 def shift_month(month_start: date, months: int) -> date:
@@ -25,6 +25,8 @@ class ExpenseRepository(Protocol):
     ) -> dict[str, tuple[int, int]]: ...
 
     async def list_recent_expenses(self, limit: int) -> list[RecentExpense]: ...
+
+    async def category_expense_totals(self, start: date, end: date) -> dict[str, int]: ...
 
     async def daily_expense_totals(self, start: date, end: date) -> dict[date, int]: ...
 
@@ -52,6 +54,34 @@ class ExpenseService:
 
     async def list_recent_expenses(self, limit: int = 10) -> list[RecentExpense]:
         return await self._repository.list_recent_expenses(limit)
+
+    async def category_expense_totals(self, start: date, end: date) -> dict[str, int]:
+        return await self._repository.category_expense_totals(start, end)
+
+    async def build_weekly_year_trend(self, today: date) -> WeeklyExpenseTrend:
+        return await self.build_weekly_trend(today, current=False)
+
+    async def build_weekly_trend(self, today: date, current: bool) -> WeeklyExpenseTrend:
+        current_week_start = today - timedelta(days=today.weekday())
+        week_start = current_week_start if current else current_week_start - timedelta(weeks=1)
+        first_week_start = week_start - timedelta(weeks=52)
+        end = today + timedelta(days=1) if current else current_week_start
+        daily = await self._repository.daily_expense_totals(first_week_start, end)
+
+        def cumulative(start: date) -> list[int]:
+            running = 0
+            series = []
+            for day in range(7):
+                running += daily.get(start + timedelta(days=day), 0)
+                series.append(running)
+            return series
+
+        week_cumulative: list[int | None] = cumulative(week_start)
+        if current:
+            week_cumulative = [value if index <= today.weekday() else None for index, value in enumerate(week_cumulative)]
+        history = [cumulative(first_week_start + timedelta(weeks=index)) for index in range(52)]
+        average = [sum(series[day] for series in history) / 52 for day in range(7)]
+        return WeeklyExpenseTrend(week_start, week_cumulative, average, is_current_week=current)
 
     async def build_expense_trend(self, today: date) -> ExpenseTrend:
         current_start = today.replace(day=1)

@@ -10,7 +10,7 @@ matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 from matplotlib.ticker import FuncFormatter
 
-from expense_bot.models import ExpenseTrend
+from expense_bot.models import ExpenseTrend, WeeklyExpenseTrend
 
 
 def render_expense_trend(trend: ExpenseTrend) -> bytes:
@@ -52,6 +52,33 @@ def render_expense_trend(trend: ExpenseTrend) -> bytes:
     # Flatten the Matplotlib RGBA output to a regular RGB PNG. Telegram's
     # photo pipeline can mishandle transparency, while an RGB PNG sent as a
     # document is preserved byte-for-byte.
+    result = BytesIO()
+    with Image.open(rendered) as image:
+        image.convert("RGB").save(result, format="PNG")
+    return result.getvalue()
+
+
+def render_weekly_year_trend(trend: WeeklyExpenseTrend) -> bytes:
+    figure, axis = plt.subplots(figsize=(7, 4.2), dpi=150)
+    days = list(range(1, 8))
+    axis.plot(days, trend.average_cumulative, color="#f59e0b", linewidth=2.2,
+              linestyle="--", label="Среднее за предыдущие 52 недели")
+    axis.plot(days, trend.current_cumulative, color="#2563eb", linewidth=2.6,
+              marker="o", markersize=3,
+              label=f"{'Текущая' if trend.is_current_week else 'Прошлая'} неделя ({trend.week_start:%d.%m.%Y})")
+    axis.set_xticks(days, ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"])
+    axis.set_xlim(1, 7)
+    axis.set_title("Накопительные расходы по дням недели", fontsize=12, pad=10)
+    axis.set_xlabel("День недели", fontsize=9)
+    axis.set_ylabel("Накопительная сумма", fontsize=9)
+    axis.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:,.0f}".replace(",", " ")))
+    axis.grid(True, alpha=0.2)
+    axis.legend(loc="upper left", frameon=False, fontsize=8)
+    figure.tight_layout()
+    rendered = BytesIO()
+    figure.savefig(rendered, format="png", bbox_inches="tight", facecolor="white")
+    plt.close(figure)
+    rendered.seek(0)
     result = BytesIO()
     with Image.open(rendered) as image:
         image.convert("RGB").save(result, format="PNG")

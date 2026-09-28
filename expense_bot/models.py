@@ -28,6 +28,14 @@ class ExpenseTrend:
     history_label: str
 
 
+@dataclass(frozen=True)
+class WeeklyExpenseTrend:
+    week_start: date
+    current_cumulative: list[int | None]
+    average_cumulative: list[float]
+    is_current_week: bool = False
+
+
 class ExpenseRecord(BaseModel):
     expense_type: ExpenseType
     expense_date: date

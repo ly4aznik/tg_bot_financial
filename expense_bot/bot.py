@@ -15,9 +15,10 @@ from telegram.ext import Application, ApplicationHandlerStop, CallbackQueryHandl
 
 from expense_bot.categories import ExpenseType
 from expense_bot.models import ExpenseRecord, RecentExpense
+from expense_bot.polling import MonitoredPollingRequest, cancel_task, watch_polling
 from expense_bot.services.audit_logger import AuditLogger
 from expense_bot.services.expense_service import ExpenseService
-from expense_bot.trend_chart import render_expense_trend
+from expense_bot.trend_chart import render_expense_trend, render_weekly_year_trend
 
 LOGGER = logging.getLogger(__name__)
 DRAFT_KEY = "expense_draft_v2"
@@ -53,9 +54,18 @@ class ExpenseTelegramBot:
         self._audit_logger = audit_logger
         self._timezone = timezone
         self._allowed_user_ids = allowed_user_ids
+        self._polling_request = MonitoredPollingRequest()
+        self._polling_watchdog_task: asyncio.Task[None] | None = None
 
     def build_application(self) -> Application:
-        application = Application.builder().token(self._token).post_init(self._post_init).build()
+        application = (
+            Application.builder()
+            .token(self._token)
+            .get_updates_request(self._polling_request)
+            .post_init(self._post_init)
+            .post_shutdown(self._post_shutdown)
+            .build()
+        )
         application.add_handler(TypeHandler(Update, self._authorize_update), group=-1)
         application.add_handler(CommandHandler("start", self.start))
         application.add_handler(CommandHandler("help", self.start))
@@ -64,6 +74,8 @@ class ExpenseTelegramBot:
         application.add_handler(CommandHandler("summary", self.summary))
         application.add_handler(CommandHandler("recent", self.recent))
         application.add_handler(CommandHandler("trend", self.trend))
+        application.add_handler(CommandHandler("lastweek", self.lastweek))
+        application.add_handler(CommandHandler("thisweek", self.thisweek))
         application.add_handler(CommandHandler(["categories", "types"], self.show_categories))
         application.add_handler(CallbackQueryHandler(self.handle_callback, pattern=r"^e2:"))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
@@ -90,9 +102,20 @@ class ExpenseTelegramBot:
             BotCommand("summary", "Сводка за месяц и год"),
             BotCommand("recent", "Последние 10 расходов"),
             BotCommand("trend", "График расходов и тренда"),
+            BotCommand("lastweek", "Прошлая неделя и тренд за год"),
+            BotCommand("thisweek", "Текущая неделя и тренд за год"),
             BotCommand("categories", "Показать категории"),
             BotCommand("help", "Показать справку"),
         ])
+        self._polling_watchdog_task = asyncio.create_task(
+            watch_polling(application, self._polling_request),
+            name="telegram-polling-watchdog",
+        )
+
+    async def _post_shutdown(self, application: Application) -> None:
+        del application
+        await cancel_task(self._polling_watchdog_task)
+        self._polling_watchdog_task = None
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message:
@@ -164,6 +187,53 @@ class ExpenseTelegramBot:
             return
         await self._send_trend_chart(update.message, update)
 
+    async def lastweek(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not update.message:
+            return
+        await self._send_week(update.message, update, current=False)
+
+    async def thisweek(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not update.message:
+            return
+        await self._send_week(update.message, update, current=True)
+
+    async def _send_week(self, message: Message, update: Update, current: bool) -> None:
+        today = datetime.now(self._timezone).date()
+        current_week_start = today - timedelta(days=today.weekday())
+        week_start = current_week_start if current else current_week_start - timedelta(weeks=1)
+        period_end = today + timedelta(days=1) if current else current_week_start
+        week_label = self._week_label(week_start, current)
+        totals = await self._service.category_expense_totals(week_start, period_end)
+        table = self._format_period_table({key: (value, 0) for key, value in totals.items()}, 0, sum(totals.values()))
+        trend = await self._service.build_weekly_trend(today, current=current)
+        image = await asyncio.to_thread(render_weekly_year_trend, trend)
+        day_index = today.weekday() if current else 6
+        current_total = trend.current_cumulative[day_index]
+        assert current_total is not None
+        average = trend.average_cumulative[day_index]
+        difference = current_total - average
+        caption = self._format_week_caption(week_label, table, current, average, difference)
+        await message.reply_photo(
+            photo=InputFile(image, filename=f"weekly-trend-{week_start:%Y-%m-%d}.png"),
+            caption=caption,
+            parse_mode="HTML",
+        )
+        self._audit("this_week_requested" if current else "last_week_requested", update, week_start=week_start.isoformat())
+
+    @staticmethod
+    def _format_week_caption(week_label: str, table: str, current: bool, average: float, difference: float) -> str:
+        comparison = (
+            f"Среднее к {'сегодня' if current else 'концу недели'} за предыдущие 52 недели: {average:,.0f}\n"
+            f"Отклонение: {difference:+,.0f}"
+        ).replace(",", " ")
+        return f"<b>{escape(week_label)}</b>\n<pre>{escape(table)}</pre>\n{comparison}"
+
+    @staticmethod
+    def _week_label(week_start: date, current: bool) -> str:
+        iso_year, week_number, _ = week_start.isocalendar()
+        title = "Текущая" if current else "Прошлая"
+        return f"{title} неделя №{week_number} ({iso_year}): {week_start:%d.%m.%Y}–{week_start + timedelta(days=6):%d.%m.%Y}"
+
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.effective_user:
             return
@@ -210,6 +280,14 @@ class ExpenseTelegramBot:
         if action == "trend":
             if query.message:
                 await self._send_trend_chart(query.message, update)
+            return
+        if action == "lastweek":
+            if query.message:
+                await self._send_week(query.message, update, current=False)
+            return
+        if action == "thisweek":
+            if query.message:
+                await self._send_week(query.message, update, current=True)
             return
 
         draft = self._draft(context)
@@ -369,6 +447,8 @@ class ExpenseTelegramBot:
             [InlineKeyboardButton("➕ Добавить расход", callback_data=f"{CALLBACK_PREFIX}:new")],
             [InlineKeyboardButton("🕘 Последние 10", callback_data=f"{CALLBACK_PREFIX}:recent")],
             [InlineKeyboardButton("📈 Расходы и тренд", callback_data=f"{CALLBACK_PREFIX}:trend")],
+            [InlineKeyboardButton("📊 Прошлая неделя", callback_data=f"{CALLBACK_PREFIX}:lastweek")],
+            [InlineKeyboardButton("📊 Текущая неделя", callback_data=f"{CALLBACK_PREFIX}:thisweek")],
         ])
 
     @staticmethod
