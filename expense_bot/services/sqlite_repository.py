@@ -5,7 +5,7 @@ import sqlite3
 from datetime import date
 from pathlib import Path
 
-from expense_bot.models import ExpenseRecord, RecentExpense
+from expense_bot.models import ExpenseRecord, RecentExpense, SavedExpense
 
 
 class SQLiteExpenseRepository:
@@ -40,6 +40,56 @@ class SQLiteExpenseRepository:
 
     async def list_recent_expenses(self, limit: int) -> list[RecentExpense]:
         return await asyncio.to_thread(self._list_recent_expenses_sync, limit)
+
+    async def get_last_expense(self) -> SavedExpense | None:
+        return await asyncio.to_thread(self._get_last_expense_sync)
+
+    async def delete_last_expense(self, expected: SavedExpense) -> bool:
+        return await asyncio.to_thread(self._delete_last_expense_sync, expected)
+
+    async def update_last_expense(self, expected: SavedExpense, expense: ExpenseRecord) -> bool:
+        return await asyncio.to_thread(self._update_last_expense_sync, expected, expense)
+
+    def _get_last_expense_sync(self) -> SavedExpense | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT expense_date, expense_amount, expense_type, expense_description, id "
+                "FROM expenses ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        return SavedExpense(date.fromisoformat(row[0]), int(row[1]), row[2], row[3], row[4])
+
+    @staticmethod
+    def _expected_values(expected: SavedExpense) -> tuple:
+        return (
+            expected.id, expected.expense_date.isoformat(), expected.expense_amount,
+            expected.expense_type, expected.expense_description,
+        )
+
+    def _delete_last_expense_sync(self, expected: SavedExpense) -> bool:
+        # A single statement checks and deletes atomically, even with concurrent writers.
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM expenses WHERE id = ? AND id = (SELECT MAX(id) FROM expenses) "
+                "AND expense_date = ? AND expense_amount = ? AND expense_type = ? AND expense_description = ?",
+                self._expected_values(expected),
+            )
+            return cursor.rowcount == 1
+
+    def _update_last_expense_sync(self, expected: SavedExpense, expense: ExpenseRecord) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE expenses SET expense_date = ?, expense_amount = ?, expense_type = ?, expense_description = ? "
+                "WHERE id = ? AND id = (SELECT MAX(id) FROM expenses) "
+                "AND expense_date = ? AND expense_amount = ? AND expense_type = ? AND expense_description = ?",
+                (
+                    expense.expense_date.isoformat(), int(expense.expense_amount),
+                    expense.expense_type.value, expense.expense_description,
+                    *self._expected_values(expected),
+                ),
+            )
+            return cursor.rowcount == 1
 
     async def daily_expense_totals(self, start: date, end: date) -> dict[date, int]:
         return await asyncio.to_thread(self._daily_expense_totals_sync, start, end)

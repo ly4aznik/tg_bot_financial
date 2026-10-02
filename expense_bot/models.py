@@ -19,6 +19,11 @@ class RecentExpense:
 
 
 @dataclass(frozen=True)
+class SavedExpense(RecentExpense):
+    id: int
+
+
+@dataclass(frozen=True)
 class ExpenseTrend:
     days: list[int]
     current_cumulative: list[int | None]

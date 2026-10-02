@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from html import escape
@@ -22,6 +23,7 @@ from expense_bot.trend_chart import render_expense_trend, render_weekly_year_tre
 
 LOGGER = logging.getLogger(__name__)
 DRAFT_KEY = "expense_draft_v2"
+DELETE_KEY = "expense_delete_pending"
 CALLBACK_PREFIX = "e2"
 SUMMARY_LABELS = {
     ExpenseType.FOOD_DELIVERY: "Общепит/доставка",
@@ -73,6 +75,8 @@ class ExpenseTelegramBot:
         application.add_handler(CommandHandler("cancel", self.cancel))
         application.add_handler(CommandHandler("summary", self.summary))
         application.add_handler(CommandHandler("recent", self.recent))
+        application.add_handler(CommandHandler("delete_last", self.delete_last))
+        application.add_handler(CommandHandler("edit_last", self.edit_last))
         application.add_handler(CommandHandler("trend", self.trend))
         application.add_handler(CommandHandler("lastweek", self.lastweek))
         application.add_handler(CommandHandler("thisweek", self.thisweek))
@@ -101,6 +105,8 @@ class ExpenseTelegramBot:
             BotCommand("cancel", "Отменить текущий ввод"),
             BotCommand("summary", "Сводка за месяц и год"),
             BotCommand("recent", "Последние 10 расходов"),
+            BotCommand("delete_last", "Удалить последний расход"),
+            BotCommand("edit_last", "Изменить последний расход"),
             BotCommand("trend", "График расходов и тренда"),
             BotCommand("lastweek", "Прошлая неделя и тренд за год"),
             BotCommand("thisweek", "Текущая неделя и тренд за год"),
@@ -135,10 +141,13 @@ class ExpenseTelegramBot:
 
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         draft = self._draft(context)
+        pending_delete = context.user_data.pop(DELETE_KEY, None)
         context.user_data.pop(DRAFT_KEY, None)
         if update.message:
             await update.message.reply_text(
-                "Ввод расхода отменён." if draft else "Сейчас нет незавершённого расхода.",
+                "Удаление отменено." if pending_delete else (
+                    "Ввод расхода отменён." if draft else "Сейчас нет незавершённого расхода."
+                ),
                 reply_markup=self._start_markup(),
             )
         if draft:
@@ -181,6 +190,90 @@ class ExpenseTelegramBot:
         expenses = await self._service.list_recent_expenses()
         await update.message.reply_text(self._format_recent_expenses(expenses))
         self._audit("recent_expenses_requested", update, count=len(expenses))
+
+    async def delete_last(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message:
+            await self._request_delete(update.message, update, context)
+
+    async def edit_last(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message:
+            await self._request_edit(update.message, update, context)
+
+    async def _request_edit(self, message: Message, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        expense = await self._service.get_last_expense()
+        if expense is None:
+            await message.reply_text("Сохранённых расходов пока нет.", reply_markup=self._start_markup())
+            return
+        context.user_data.pop(DELETE_KEY, None)
+        draft = {
+            **self._new_draft(), "step": "summary", "original_expense": expense,
+            "expense_date": expense.expense_date.isoformat(),
+            "expense_amount": str(expense.expense_amount),
+            "expense_type": expense.expense_type,
+            "expense_description": expense.expense_description,
+        }
+        context.user_data[DRAFT_KEY] = draft
+        await message.reply_text(
+            "Изменение последнего расхода.\n\n" + self._summary(draft),
+            reply_markup=self._summary_markup(draft["flow_id"]),
+        )
+        self._audit("expense_edit_started", update, expense_id=expense.id)
+
+    async def _request_delete(self, message: Message, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        context.user_data.pop(DELETE_KEY, None)
+        expense = await self._service.get_last_expense()
+        if expense is None:
+            await message.reply_text("Сохранённых расходов пока нет.", reply_markup=self._start_markup())
+            return
+        token = uuid4().hex[:12]
+        context.user_data[DELETE_KEY] = {
+            "token": token, "expense": expense, "chat_id": update.effective_chat.id,
+        }
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Удалить", callback_data=f"e2:delete_confirm:{token}"),
+            InlineKeyboardButton("Отмена", callback_data=f"e2:delete_cancel:{token}"),
+        ]])
+        await message.reply_text(
+            "Удалить последний добавленный расход?\n\n" + self._format_expense(expense),
+            reply_markup=markup,
+        )
+        self._audit("expense_delete_requested", update, expense_id=expense.id)
+
+    async def _confirm_delete(
+        self, query: CallbackQuery, update: Update, context: ContextTypes.DEFAULT_TYPE,
+        token: str, cancel: bool,
+    ) -> None:
+        pending = context.user_data.get(DELETE_KEY)
+        if (
+            not pending or pending["token"] != token
+            or pending["chat_id"] != update.effective_chat.id
+            or pending.get("deleting")
+        ):
+            await self._edit(query, "Подтверждение устарело. Используй /delete_last заново.", self._start_markup())
+            return
+        if cancel:
+            context.user_data.pop(DELETE_KEY, None)
+            await self._edit(query, "Удаление отменено.", self._start_markup())
+            return
+        pending["deleting"] = True
+        expense = pending["expense"]
+        try:
+            deleted = await self._service.delete_last_expense(expense)
+        except Exception:
+            pending["deleting"] = False
+            LOGGER.exception("Failed to delete last expense")
+            if query.message:
+                await query.message.reply_text("Не удалось удалить расход. Попробуй подтвердить ещё раз.")
+            return
+        context.user_data.pop(DELETE_KEY, None)
+        if not deleted:
+            await self._edit(
+                query, "Последняя запись изменилась. Ничего не удалено. Используй /delete_last заново.",
+                self._start_markup(),
+            )
+            return
+        self._audit("expense_deleted", update, expense=asdict(expense))
+        await self._edit(query, "Расход удалён.\n\n" + self._format_expense(expense), self._start_markup())
 
     async def trend(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message:
@@ -259,6 +352,20 @@ class ExpenseTelegramBot:
         await query.answer()
         parts = query.data.split(":")
         action = parts[1] if len(parts) > 1 else ""
+        if action == "edit_last":
+            if query.message:
+                await self._request_edit(query.message, update, context)
+            return
+        if action == "delete_last":
+            if query.message:
+                await self._request_delete(query.message, update, context)
+            return
+        if action in {"delete_confirm", "delete_cancel"}:
+            await self._confirm_delete(
+                query, update, context, parts[2] if len(parts) == 3 else "",
+                cancel=action == "delete_cancel",
+            )
+            return
         if action == "new":
             draft = self._new_draft()
             context.user_data[DRAFT_KEY] = draft
@@ -422,7 +529,18 @@ class ExpenseTelegramBot:
                 "telegram_user_id": query.from_user.id,
                 "telegram_username": query.from_user.username,
             })
-            await self._service.persist_expense(record)
+            original = draft.get("original_expense")
+            if original is not None:
+                updated = await self._service.update_last_expense(original, record)
+                if not updated:
+                    context.user_data.pop(DRAFT_KEY, None)
+                    await self._edit(
+                        query, "Последняя запись изменилась. Ничего не сохранено. Используй /edit_last заново.",
+                        self._start_markup(),
+                    )
+                    return
+            else:
+                await self._service.persist_expense(record)
         except Exception as exc:
             draft["saving"] = False
             LOGGER.exception("Failed to persist development expense")
@@ -430,8 +548,12 @@ class ExpenseTelegramBot:
             await self._edit(query, "Не удалось обработать запись. Попробуй сохранить ещё раз.", self._summary_markup(draft["flow_id"]))
             return
         context.user_data.pop(DRAFT_KEY, None)
-        self._audit("expense_persisted", update, flow_id=draft["flow_id"], storage="sqlite", expense=record)
-        await self._edit(query, "Расход сохранён.\n\n" + self._format_expense(record), self._start_markup())
+        if original is not None:
+            self._audit("expense_updated", update, expense_id=original.id, before=asdict(original), expense=record)
+        else:
+            self._audit("expense_persisted", update, flow_id=draft["flow_id"], storage="sqlite", expense=record)
+        title = "Расход изменён." if original is not None else "Расход сохранён."
+        await self._edit(query, title + "\n\n" + self._format_expense(record), self._start_markup())
 
     def _new_draft(self) -> dict[str, Any]:
         return {"flow_id": uuid4().hex[:12], "step": "date"}
@@ -446,6 +568,8 @@ class ExpenseTelegramBot:
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("➕ Добавить расход", callback_data=f"{CALLBACK_PREFIX}:new")],
             [InlineKeyboardButton("🕘 Последние 10", callback_data=f"{CALLBACK_PREFIX}:recent")],
+            [InlineKeyboardButton("🗑 Удалить последний", callback_data=f"{CALLBACK_PREFIX}:delete_last")],
+            [InlineKeyboardButton("✏️ Изменить последний", callback_data=f"{CALLBACK_PREFIX}:edit_last")],
             [InlineKeyboardButton("📈 Расходы и тренд", callback_data=f"{CALLBACK_PREFIX}:trend")],
             [InlineKeyboardButton("📊 Прошлая неделя", callback_data=f"{CALLBACK_PREFIX}:lastweek")],
             [InlineKeyboardButton("📊 Текущая неделя", callback_data=f"{CALLBACK_PREFIX}:thisweek")],

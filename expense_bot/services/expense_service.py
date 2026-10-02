@@ -4,7 +4,7 @@ import calendar
 from datetime import date, timedelta
 from typing import Protocol
 
-from expense_bot.models import ExpenseRecord, ExpenseTrend, RecentExpense, WeeklyExpenseTrend
+from expense_bot.models import ExpenseRecord, ExpenseTrend, RecentExpense, SavedExpense, WeeklyExpenseTrend
 
 
 def shift_month(month_start: date, months: int) -> date:
@@ -25,6 +25,12 @@ class ExpenseRepository(Protocol):
     ) -> dict[str, tuple[int, int]]: ...
 
     async def list_recent_expenses(self, limit: int) -> list[RecentExpense]: ...
+
+    async def get_last_expense(self) -> SavedExpense | None: ...
+
+    async def delete_last_expense(self, expected: SavedExpense) -> bool: ...
+
+    async def update_last_expense(self, expected: SavedExpense, expense: ExpenseRecord) -> bool: ...
 
     async def category_expense_totals(self, start: date, end: date) -> dict[str, int]: ...
 
@@ -54,6 +60,15 @@ class ExpenseService:
 
     async def list_recent_expenses(self, limit: int = 10) -> list[RecentExpense]:
         return await self._repository.list_recent_expenses(limit)
+
+    async def get_last_expense(self) -> SavedExpense | None:
+        return await self._repository.get_last_expense()
+
+    async def delete_last_expense(self, expected: SavedExpense) -> bool:
+        return await self._repository.delete_last_expense(expected)
+
+    async def update_last_expense(self, expected: SavedExpense, expense: ExpenseRecord) -> bool:
+        return await self._repository.update_last_expense(expected, expense)
 
     async def category_expense_totals(self, start: date, end: date) -> dict[str, int]:
         return await self._repository.category_expense_totals(start, end)
