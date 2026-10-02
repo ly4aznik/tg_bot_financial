@@ -22,3 +22,4 @@ class ExpenseType(StrEnum):
     TRAVEL = "Путешествия"
     WIFE_SALARY = "Зарплата жены"
     GADGETS = "Гаджеты"
+    PARENTS_SUPPORT = "Помощь родителям"

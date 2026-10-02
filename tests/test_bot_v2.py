@@ -37,7 +37,7 @@ def build_bot(tmp_path: Path) -> ExpenseTelegramBot:
 def test_category_keyboard_contains_all_categories_and_safe_callbacks(tmp_path: Path) -> None:
     markup = build_bot(tmp_path)._category_markup("a1b2c3d4e5f6")
     buttons = [button for row in markup.inline_keyboard for button in row]
-    assert len(buttons) == len(ExpenseType) == 20
+    assert len(buttons) == len(ExpenseType) == 21
     assert {button.text for button in buttons} == {item.value for item in ExpenseType}
     assert all(button.callback_data and len(button.callback_data.encode("utf-8")) <= 64 for button in buttons)
 
