@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly SQLite backup for Telegram financial bot
+
+[Timer]
+OnCalendar=Mon *-*-* 03:00:00 Europe/Moscow
+Persistent=true
+Unit=tg-bot-financial-backup.service
+
+[Install]
+WantedBy=timers.target

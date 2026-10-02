@@ -69,6 +69,79 @@ docker compose logs -f bot
 
 Файл `.env` не входит в образ. Каталоги `data/` и `logs/` подключаются как постоянные тома с хоста.
 
+## Еженедельные бэкапы SQLite
+
+Бэкапы выполняет пользовательский `systemd`-сервис `nikita` на сервере, без контейнера.
+Таймер запускает его каждый понедельник в 03:00 по Москве. После создания
+копии процесс завершается. Если сервер был выключен в назначенное время,
+`Persistent=true` запускает пропущенное задание после включения.
+При ошибке сервис повторяет попытку через час; логи доступны в journal.
+
+Копии сохраняются в `/mnt/storage/shared/backup/tg_bot_financial/`.
+Нужен системный Python 3.10+ с модулем `sqlite3`; зависимости бота для бэкапов
+не требуются. Сервис читает базу непосредственно из каталога `data/` на хосте,
+который подключён к контейнеру бота.
+
+Файлы сервиса и таймера находятся в `deploy/systemd/`. В сервисе указан путь
+проекта `%h/apps/tg_bot_financial` (`%h` — домашний каталог пользователя):
+на homeserver это `/home/nikita/apps/tg_bot_financial`. Если репозиторий расположен иначе, измените
+`WorkingDirectory` и путь скрипта в `ExecStart`
+перед установкой. При нестандартном пути базы укажите её реальный путь на хосте,
+а не путь внутри контейнера. По умолчанию `SQLITE_DATABASE_PATH` задан относительно
+`WorkingDirectory`. `.env` бота сервис не читает.
+
+Для работы после выхода из SSH и перезагрузки нужен `Linger=yes`:
+`loginctl show-user nikita -p Linger`. На homeserver он уже включён.
+На другом сервере администратор может включить его командой `sudo loginctl enable-linger nikita`.
+
+Установка выполняется из каталога проекта на сервере. Сначала убедитесь, что
+диск смонтирован в `/mnt/storage`, затем:
+
+```bash
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+mkdir -p /mnt/storage/shared/backup/tg_bot_financial
+mkdir -p ~/.config/systemd/user
+install -m 644 deploy/systemd/tg-bot-financial-backup.service ~/.config/systemd/user/
+install -m 644 deploy/systemd/tg-bot-financial-backup.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemd-analyze --user verify ~/.config/systemd/user/tg-bot-financial-backup.service ~/.config/systemd/user/tg-bot-financial-backup.timer
+systemctl --user start tg-bot-financial-backup.service
+systemctl --user enable --now tg-bot-financial-backup.timer
+systemctl --user list-timers tg-bot-financial-backup.timer
+journalctl --user -u tg-bot-financial-backup.service -n 50 --no-pager
+```
+
+Ручной `systemctl --user start` создаёт первую копию сразу. Дальше работает недельный
+таймер. Перед каждым бэкапом `mountpoint` проверяет, что `/mnt/storage` смонтирован;
+если диск недоступен, сервис завершится с ошибкой и повторит попытку через час.
+Сервис запускается от `nikita`; копии создаются с правами только для владельца
+(`UMask=0077`). Если ранее был запущен контейнер
+бэкапов, после обновления Compose удалите его командой
+`docker compose up -d --remove-orphans`.
+
+Файлы имеют вид `expenses-20261002T090000000000Z.sqlite3` (время UTC).
+SQLite Backup API создаёт согласованную копию работающей базы, включая
+подтверждённые изменения в WAL. После `PRAGMA integrity_check` файл атомарно
+переименовывается в итоговый; незавершённые `.tmp` не считаются бэкапами.
+Старые копии сохраняются без автоматического удаления.
+
+Для восстановления остановите таймер, сервис бэкапов и бота, выберите нужную копию и замените
+базу (команды ниже предполагают стандартный путь `data/expenses.sqlite3`):
+
+```bash
+systemctl --user stop tg-bot-financial-backup.timer tg-bot-financial-backup.service
+docker compose stop bot
+mv data/expenses.sqlite3 data/expenses.sqlite3.before-restore
+# Сохраните также WAL/SHM прежней базы, если они есть.
+for file in data/expenses.sqlite3-wal data/expenses.sqlite3-shm; do
+  if [ -f "$file" ]; then mv "$file" "$file.before-restore"; fi
+done
+cp /mnt/storage/shared/backup/tg_bot_financial/expenses-<время>.sqlite3 data/expenses.sqlite3
+# Если бот запускается не от root, верните владельца и права файла базы.
+docker compose up -d
+systemctl --user start tg-bot-financial-backup.timer
+```
+
 На homeserver контейнер использует существующий HTTP-прокси Xray в сети `nextcloud_proxy` для доступа к Telegram API.
 
 Исходный код прежней версии доступен по Git-тегу `v1.0`.
